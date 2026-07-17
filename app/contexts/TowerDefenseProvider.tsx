@@ -172,12 +172,19 @@ export const TowerDefenseProvider = ({
   // board, at which point the bar begins filling. Cleared once the confirmed
   // board reflects the pending upgrade (predicted derives it) or the action ends.
   const pendingUpgradesRef = useRef<Set<number>>(new Set())
-  // Set true while a reset is in flight. reset_board rewinds the on-chain tick
-  // to 0, but a lagging RPC/subscription can still deliver the PRE-reset board
-  // (high tick, old units) a moment later. Treated as a forward step, that would
-  // re-introduce the old enemies. While this guard is on we ignore any confirmed
-  // board that isn't the fresh tick-0 state; it clears once we've seen tick 0.
+  // Reset guard. reset_board rewinds the on-chain tick to 0, but a lagging
+  // RPC/subscription can still deliver the PRE-reset board (high tick, old
+  // units) a moment later - even AFTER we've applied the fresh tick-0 board.
+  // Treated as a forward step that would re-introduce the old game. We defend in
+  // two phases:
+  //   1. `awaitingResetRef`: until we've seen the fresh tick-0 board, drop every
+  //      non-tick-0 update.
+  //   2. `resetGuardUntilRef`: for a short window after that, keep dropping any
+  //      update whose tick is implausibly far ahead of a freshly-reset game
+  //      (a genuine new game only advances ~10 ticks/s), catching late laggards.
   const awaitingResetRef = useRef(false)
+  const resetGuardUntilRef = useRef(0)
+  const resetGuardAtRef = useRef(0)
 
   // confirmedRef is the source of truth for game logic (lives/gameover checks).
   const confirmedRef = latestRef
@@ -194,14 +201,31 @@ export const TowerDefenseProvider = ({
     // While a reset is pending, drop any stale pre-reset board (high tick / old
     // units) that a lagging RPC may still push. Accept only the fresh tick-0
     // board, which clears the guard.
+    let forceSnap = false
     if (awaitingResetRef.current) {
       if (sim.currentTick !== 0) return
       awaitingResetRef.current = false
+      // Enter the second-phase window: laggard pre-reset updates can still land
+      // for a moment; keep dropping implausibly-high ticks below.
+      resetGuardAtRef.current = performance.now()
+      resetGuardUntilRef.current = performance.now() + 4000
+      // Force a full snap below even if the previous confirmed tick was already
+      // 0 (e.g. reset right after init, or a double reset). Without this the
+      // tick-comparison would take the "same tick" MERGE branch and old
+      // towers/units in the buffer could survive the reset.
+      forceSnap = true
+    } else if (performance.now() < resetGuardUntilRef.current) {
+      // Post-reset window: a genuine new game advances at ~10 ticks/s, so its
+      // tick can't be more than elapsed*10 (+slack). Anything far above that is
+      // a stale pre-reset laggard - drop it.
+      const elapsedSec = (performance.now() - resetGuardAtRef.current) / 1000
+      const plausibleTick = Math.ceil(elapsedSec * 10) + MAX_TICKS_PER_SLICE
+      if (sim.currentTick > plausibleTick) return
     }
 
     const prevLatest = latestRef.current
 
-    if (!prevLatest || sim.currentTick < prevLatest.currentTick) {
+    if (forceSnap || !prevLatest || sim.currentTick < prevLatest.currentTick) {
       // First load or a rewind (e.g. reset to tick 0): snap the whole playback
       // model to this state and start the real-time budget window now.
       confirmedBufRef.current = [sim]
@@ -265,6 +289,9 @@ export const TowerDefenseProvider = ({
     lastFrameRef.current = 0
     confirmedAtRef.current = 0
     pendingUpgradesRef.current.clear()
+    awaitingResetRef.current = false
+    resetGuardUntilRef.current = 0
+    resetGuardAtRef.current = 0
     if (!publicKey) {
       setBoardPDA(null)
       return
@@ -557,7 +584,23 @@ export const TowerDefenseProvider = ({
         })
         .transaction()
       await sendMain(tx)
-      await refresh()
+      // Fetch the freshly-reset account directly and snap the whole local model
+      // to it. We DON'T rely solely on the subscription/refresh + tick-compare:
+      // if the previous confirmed tick was already 0, that path would merge
+      // instead of snap and old entities could linger. Clearing the buffer +
+      // playback refs here and applying the fetched tick-0 board guarantees a
+      // clean slate. The awaitingReset guard stays armed until applyConfirmed
+      // sees this tick-0 board (forceSnap), so any lagging pre-reset update is
+      // still dropped.
+      const fresh = await program.account.board.fetch(boardPDA)
+      confirmedBufRef.current = []
+      latestRef.current = null
+      playbackTickRef.current = 0
+      ceilingTickRef.current = 0
+      lastFrameRef.current = 0
+      confirmedAtRef.current = performance.now()
+      setHasBoard(true)
+      applyConfirmed(fromChain(fresh))
     } catch (e) {
       // Reset never landed: disarm the guard so we don't ignore real updates.
       awaitingResetRef.current = false
@@ -565,7 +608,7 @@ export const TowerDefenseProvider = ({
     } finally {
       setBusy(false)
     }
-  }, [publicKey, boardPDA, sendMain, refresh, reportError])
+  }, [publicKey, boardPDA, sendMain, applyConfirmed, reportError])
 
   // Build the compute-budget + advance_game instructions used to SETTLE the
   // chain up to the client's playback tick before a spend. The client predicts
@@ -689,6 +732,22 @@ export const TowerDefenseProvider = ({
   const upgradeTower = useCallback(
     async (towerIndex: number) => {
       if (!publicKey || !boardPDA) return
+      // The upgrade targets a tower SLOT INDEX on-chain, so the index must exist
+      // on the CONFIRMED board (chain truth). A stale confirmed board (e.g. after
+      // a reset/redeploy the account had fewer towers than what we last rendered)
+      // would otherwise send an index the program rejects with InvalidTower. If
+      // it looks out of range, re-fetch and bail rather than send a doomed tx.
+      const chain = confirmedRef.current
+      if (
+        !chain ||
+        towerIndex < 0 ||
+        towerIndex >= chain.towerCount ||
+        chain.towers[towerIndex]?.kind === 0
+      ) {
+        notify("That tower isn't on-chain yet — try again in a moment.")
+        await refresh()
+        return
+      }
       // Guards mirror the program but against the PREDICTED board (see
       // placeTower) since the bundled advance_game settles the chain first.
       const board = predictedRef.current ?? confirmedRef.current

@@ -206,8 +206,27 @@ export function positionAt(board: SimBoard, progress: number): [number, number] 
   return [last.x * SUBTILES_PER_TILE, last.y * SUBTILES_PER_TILE]
 }
 
-// Resolve tower shots for a single tick (mirror of apply_tick_shots).
-function applyTickShots(board: SimBoard, tick: number): void {
+// A single tower shot that landed during simulation. Emitted via the optional
+// ShotSink so the renderer can draw one distinct bullet + damage number per
+// shot, instead of lumping several shots into one frame-diff delta.
+export interface ShotEvent {
+  tick: number
+  towerIndex: number
+  towerX: number
+  towerY: number
+  unitIndex: number
+  damage: number // actual hp removed (clamped to remaining hp)
+  killed: boolean
+}
+export type ShotSink = (e: ShotEvent) => void
+
+// Resolve tower shots for a single tick (mirror of apply_tick_shots). When
+// `onShot` is provided, each landed shot is reported for animation.
+function applyTickShots(
+  board: SimBoard,
+  tick: number,
+  onShot?: ShotSink
+): void {
   for (let ti = 0; ti < board.towerCount; ti++) {
     const tower = board.towers[ti]
     if (tower.kind === TOWER_KIND_NONE) continue
@@ -241,19 +260,38 @@ function applyTickShots(board: SimBoard, tick: number): void {
 
     if (best !== -1) {
       const unit = board.units[best]
+      const dealt = Math.min(unit.hp, tower.damage)
       unit.hp = Math.max(0, unit.hp - tower.damage)
-      if (unit.hp === 0) {
+      const killed = unit.hp === 0
+      if (killed) {
         unit.state = UNIT_STATE_DEAD
         board.gold += unit.reward
         board.kills += 1
       }
       board.towers[ti].lastShotTick = tick
+      if (onShot) {
+        onShot({
+          tick,
+          towerIndex: ti,
+          towerX: tower.x,
+          towerY: tower.y,
+          unitIndex: best,
+          damage: dealt,
+          killed,
+        })
+      }
     }
   }
 }
 
-// Advance the simulation by exactly `ticks` ticks (mirror of apply_ticks).
-export function applyTicks(board: SimBoard, ticks: number): void {
+// Advance the simulation by exactly `ticks` ticks (mirror of apply_ticks). When
+// `onShot` is provided, every individual tower shot is reported so the renderer
+// can animate distinct hits.
+export function applyTicks(
+  board: SimBoard,
+  ticks: number,
+  onShot?: ShotSink
+): void {
   const pathLenSub = pathLengthSubtiles(board)
   for (let applied = 0; applied < ticks; applied++) {
     const tick = board.currentTick + 1
@@ -288,7 +326,7 @@ export function applyTicks(board: SimBoard, ticks: number): void {
       }
     }
 
-    applyTickShots(board, tick)
+    applyTickShots(board, tick, onShot)
 
     for (let i = 0; i < board.units.length; i++) {
       const u = board.units[i]

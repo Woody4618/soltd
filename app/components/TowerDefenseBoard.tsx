@@ -5,11 +5,14 @@ import {
   SimBoard,
   SUBTILES_PER_TILE,
   UNIT_STATE_WALKING,
-  UNIT_STATE_DEAD,
   positionAt,
+  applyTicks,
+  cloneBoard,
+  ShotEvent,
 } from "@/utils/tdSim"
 import {
   GRID_SIZE,
+  MS_PER_TICK,
   TOWER_BUILD_TICKS,
   TOWER_UPGRADE_BUILD_TICKS,
   TOWER_BASIC_COST,
@@ -80,6 +83,8 @@ function drawBullets(
     const age = now - b.bornAt
     if (age >= BULLET_FLIGHT_MS) continue
     alive.push(b)
+    // Scheduled for a future tick (staggered replay) - keep, draw later.
+    if (age < 0) continue
     const t = age / BULLET_FLIGHT_MS
     const x = b.x0 + (b.x1 - b.x0) * t
     const y = b.y0 + (b.y1 - b.y0) * t
@@ -98,35 +103,6 @@ function drawBullets(
   return alive
 }
 
-// Find the closest tower whose range covers a unit at sub-tile (sx,sy). Used to
-// pick a plausible origin for a bullet. Cosmetic only, so "closest in range"
-// (rather than the exact tower the program targeted) is good enough and matches
-// what the player perceives. Returns null if no built tower is in range.
-function nearestShooter(
-  towerSource: SimBoard,
-  sx: number,
-  sy: number
-): { x: number; y: number } | null {
-  let best: { x: number; y: number } | null = null
-  let bestDistSq = Infinity
-  for (let i = 0; i < towerSource.towerCount; i++) {
-    const t = towerSource.towers[i]
-    if (t.kind === 0) continue
-    // Skip towers still doing their initial build (can't shoot yet).
-    if (t.pendingLevel === 0 && towerSource.currentTick < t.readyAtTick) continue
-    const tx = t.x * SUBTILES_PER_TILE
-    const ty = t.y * SUBTILES_PER_TILE
-    const dx = sx - tx
-    const dy = sy - ty
-    const distSq = dx * dx + dy * dy
-    if (distSq <= t.rangeSubtiles * t.rangeSubtiles && distSq < bestDistSq) {
-      bestDistSq = distSq
-      best = { x: t.x, y: t.y }
-    }
-  }
-  return best
-}
-
 // Draw death explosions (radial particles that fly out and fade). Returns the
 // still-live ones.
 function drawExplosions(
@@ -139,6 +115,7 @@ function drawExplosions(
     const age = now - e.bornAt
     if (age >= EXPLOSION_LIFETIME_MS) continue
     alive.push(e)
+    if (age < 0) continue
     const t = age / EXPLOSION_LIFETIME_MS
     const dist = EXPLOSION_RADIUS_PX * t
     const alpha = 1 - t
@@ -345,6 +322,7 @@ function drawBlips(
     const age = now - b.bornAt
     if (age >= BLIP_LIFETIME_MS) continue
     alive.push(b)
+    if (age < 0) continue
     const t = age / BLIP_LIFETIME_MS
     const y = b.y - BLIP_RISE_PX * t
     const alpha = 1 - t
@@ -383,8 +361,6 @@ const TowerDefenseBoard = () => {
   const bulletsRef = useRef<Bullet[]>([])
   const explosionsRef = useRef<Explosion[]>([])
   const wobbleRef = useRef<Map<number, number>>(new Map())
-  const prevUnitStatesRef = useRef<number[]>([])
-  const prevUnitHpRef = useRef<number[]>([])
   const prevBoardRef = useRef<SimBoard | null>(null)
 
   useEffect(() => {
@@ -397,67 +373,69 @@ const TowerDefenseBoard = () => {
         const ctx = canvas.getContext("2d")
         if (ctx) {
           const now = performance.now()
-          const prevStates = prevUnitStatesRef.current
-          const prevHp = prevUnitHpRef.current
           const prevBoard = prevBoardRef.current
+          // Reset detection: the playback tick rewound (game was reset, or a
+          // fresh board loaded). Clear all transient combat effects so bullets /
+          // blips / explosions / wobble from the previous game don't linger.
+          if (prevBoard && board.currentTick < prevBoard.currentTick) {
+            bulletsRef.current = []
+            blipsRef.current = []
+            explosionsRef.current = []
+            wobbleRef.current.clear()
+          }
+          // Replay the ticks that elapsed since the last frame on a clone of the
+          // previous board, capturing EACH individual tower shot. This yields one
+          // distinct damage number + bullet per shot - even when several shots
+          // land in the same render frame (multiple ticks) or on the same tick
+          // (multiple towers) - instead of the old frame-diff which lumped the
+          // combined hp drop into a single summed number.
           if (prevBoard) {
-            for (let i = 0; i < board.units.length; i++) {
-              const wasState = prevStates[i]
-              const nowState = board.units[i].state
-              const pu = prevBoard.units[i]
-
-              // HIT: hp dropped while still walking this frame.
-              const hpBefore = prevHp[i] ?? board.units[i].hp
-              const hpNow = board.units[i].hp
-              const tookDamage =
-                wasState === UNIT_STATE_WALKING &&
-                nowState === UNIT_STATE_WALKING &&
-                hpNow < hpBefore
-              if (tookDamage) {
-                const [sx, sy] = positionAt(board, board.units[i].progressSubtiles)
+            const gap = board.currentTick - prevBoard.currentTick
+            if (gap > 0 && gap <= 240) {
+              const replay = cloneBoard(prevBoard)
+              const firstTick = prevBoard.currentTick + 1
+              const onShot = (e: ShotEvent) => {
+                // Unit position right after this shot resolved (pre-movement).
+                const u = replay.units[e.unitIndex]
+                const [sx, sy] = positionAt(replay, u.progressSubtiles)
                 const tx = toPx(sx)
                 const ty = toPx(sy)
-                // Wobble the target.
-                wobbleRef.current.set(i, now)
-                // Damage number.
+                // Stagger animation start by the shot's tick so shots on
+                // successive ticks don't all pop at the same instant.
+                const bornAt = now + (e.tick - firstTick) * MS_PER_TICK
+                // Wobble the struck unit.
+                wobbleRef.current.set(e.unitIndex, bornAt)
+                // Distinct damage number for THIS shot.
                 blipsRef.current.push({
                   x: tx,
                   y: ty - 14,
-                  label: `-${hpBefore - hpNow}`,
+                  label: `-${e.damage}`,
                   color: BLIP_DAMAGE_COLOR,
-                  bornAt: now,
+                  bornAt,
                 })
-                // Bullet from the nearest in-range tower that could have fired.
-                const shooter = nearestShooter(towers, sx, sy)
-                if (shooter) {
-                  bulletsRef.current.push({
-                    x0: PADDING + shooter.x * CELL + CELL / 2,
-                    y0: PADDING + shooter.y * CELL + CELL / 2,
-                    x1: tx,
-                    y1: ty,
-                    bornAt: now,
+                // Bullet from the exact tower that fired.
+                bulletsRef.current.push({
+                  x0: PADDING + e.towerX * CELL + CELL / 2,
+                  y0: PADDING + e.towerY * CELL + CELL / 2,
+                  x1: tx,
+                  y1: ty,
+                  bornAt,
+                })
+                // Kill: reward blip + explosion at the death spot.
+                if (e.killed) {
+                  blipsRef.current.push({
+                    x: tx,
+                    y: ty - 20,
+                    label: `+${u.reward} Gold`,
+                    color: BLIP_GAIN_COLOR,
+                    bornAt,
                   })
+                  explosionsRef.current.push({ x: tx, y: ty, bornAt })
                 }
               }
-
-              // KILL: became dead this frame => reward blip + explosion.
-              if (wasState === UNIT_STATE_WALKING && nowState === UNIT_STATE_DEAD) {
-                const [sx, sy] = positionAt(prevBoard, pu.progressSubtiles)
-                const dx = toPx(sx)
-                const dy = toPx(sy)
-                blipsRef.current.push({
-                  x: dx,
-                  y: dy - 20,
-                  label: `+${pu.reward} Gold`,
-                  color: BLIP_GAIN_COLOR,
-                  bornAt: now,
-                })
-                explosionsRef.current.push({ x: dx, y: dy, bornAt: now })
-              }
+              applyTicks(replay, gap, onShot)
             }
           }
-          prevUnitStatesRef.current = board.units.map((u) => u.state)
-          prevUnitHpRef.current = board.units.map((u) => u.hp)
           prevBoardRef.current = board
 
           // Prune expired wobble entries so the map doesn't grow unbounded.
