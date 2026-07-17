@@ -42,7 +42,7 @@ pub fn reset_board(ctx: Context<ResetBoard>) -> Result<()> {
             _pad2: [0; 3],
             pending_damage: 0,
             pending_range_subtiles: 0,
-            _pad3: 0,
+            splash_radius_subtiles: 0,
             last_shot_tick: 0,
             ready_at_tick: 0,
         };
@@ -53,7 +53,8 @@ pub fn reset_board(ctx: Context<ResetBoard>) -> Result<()> {
     while ui < MAX_UNITS {
         board.units[ui] = Unit {
             state: UNIT_STATE_EMPTY,
-            _pad: [0; 3],
+            enemy_kind: ENEMY_KIND_NORMAL,
+            _pad: [0; 2],
             speed_subtiles: 0,
             hp: 0,
             max_hp: 0,

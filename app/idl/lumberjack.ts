@@ -320,6 +320,10 @@ export type Lumberjack = {
         {
           "name": "y",
           "type": "u8"
+        },
+        {
+          "name": "kind",
+          "type": "u8"
         }
       ]
     },
@@ -875,7 +879,7 @@ export type Lumberjack = {
             "type": "u32"
           },
           {
-            "name": "pad3",
+            "name": "splashRadiusSubtiles",
             "type": "u32"
           },
           {
@@ -908,11 +912,15 @@ export type Lumberjack = {
             "type": "u8"
           },
           {
+            "name": "enemyKind",
+            "type": "u8"
+          },
+          {
             "name": "pad",
             "type": {
               "array": [
                 "u8",
-                3
+                2
               ]
             }
           },
@@ -1266,6 +1274,10 @@ export const IDL: Lumberjack = {
         {
           "name": "y",
           "type": "u8"
+        },
+        {
+          "name": "kind",
+          "type": "u8"
         }
       ]
     },
@@ -1821,7 +1833,7 @@ export const IDL: Lumberjack = {
             "type": "u32"
           },
           {
-            "name": "pad3",
+            "name": "splashRadiusSubtiles",
             "type": "u32"
           },
           {
@@ -1854,11 +1866,15 @@ export const IDL: Lumberjack = {
             "type": "u8"
           },
           {
+            "name": "enemyKind",
+            "type": "u8"
+          },
+          {
             "name": "pad",
             "type": {
               "array": [
                 "u8",
-                3
+                2
               ]
             }
           },
@@ -1894,4 +1910,4 @@ export const IDL: Lumberjack = {
       }
     }
   ]
-};
+} as const as Lumberjack

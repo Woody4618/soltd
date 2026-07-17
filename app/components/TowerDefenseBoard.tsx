@@ -5,6 +5,10 @@ import {
   SimBoard,
   SUBTILES_PER_TILE,
   UNIT_STATE_WALKING,
+  ENEMY_KIND_NORMAL,
+  ENEMY_KIND_FAST,
+  ENEMY_KIND_STRONG,
+  ENEMY_KIND_BOSS,
   positionAt,
   applyTicks,
   cloneBoard,
@@ -15,9 +19,9 @@ import {
   MS_PER_TICK,
   TOWER_BUILD_TICKS,
   TOWER_UPGRADE_BUILD_TICKS,
-  TOWER_BASIC_COST,
   TOWER_UPGRADE_COST,
   TOWER_MAX_LEVEL,
+  towerDef,
 } from "@/utils/anchor"
 
 const CELL = 56 // px per tile
@@ -26,6 +30,46 @@ const SIZE = GRID_SIZE * CELL + PADDING * 2
 
 const toPx = (sub: number) =>
   PADDING + (sub / SUBTILES_PER_TILE) * CELL + CELL / 2
+
+// Per-enemy-kind visuals. `radius` is the marker size; `boss` gets a gold ring.
+// Kept here (render-only) rather than in the generated defs so the canvas owns
+// its own palette; stats/roster stay driven by the program via tdDefs.
+interface EnemyStyle {
+  fill: string
+  stroke: string
+  radius: number
+  label: string
+  boss?: boolean
+}
+const ENEMY_STYLES: Record<number, EnemyStyle> = {
+  [ENEMY_KIND_NORMAL]: {
+    fill: "#ff8787",
+    stroke: "#c92a2a",
+    radius: 10,
+    label: "Normal",
+  },
+  [ENEMY_KIND_FAST]: {
+    fill: "#ffd43b",
+    stroke: "#e67700",
+    radius: 8,
+    label: "Fast",
+  },
+  [ENEMY_KIND_STRONG]: {
+    fill: "#9775fa",
+    stroke: "#5f3dc4",
+    radius: 12,
+    label: "Strong",
+  },
+  [ENEMY_KIND_BOSS]: {
+    fill: "#f03e3e",
+    stroke: "#ffd43b",
+    radius: 17,
+    label: "Boss",
+    boss: true,
+  },
+}
+const enemyStyle = (kind: number): EnemyStyle =>
+  ENEMY_STYLES[kind] ?? ENEMY_STYLES[ENEMY_KIND_NORMAL]
 
 // A floating gold blip. Used both for "+N Gold" rewards when an enemy dies and
 // "-N Gold" costs when you buy/upgrade a tower. Position is in canvas pixels;
@@ -227,6 +271,8 @@ function draw(
           )
         : 1
 
+    const isSplash = et.splashRadiusSubtiles > 0
+
     // Range ring for anything that can shoot (armed, or upgrading = still live).
     if (!initialBuilding) {
       ctx.beginPath()
@@ -239,13 +285,31 @@ function draw(
         Math.PI * 2
       )
       ctx.stroke()
+
+      // Splash towers additionally show their blast radius as a warm dashed
+      // ring so you can see the AoE footprint around where they hit.
+      if (isSplash) {
+        ctx.beginPath()
+        ctx.setLineDash([4, 4])
+        ctx.strokeStyle = "rgba(255, 146, 43, 0.35)"
+        ctx.arc(
+          cx,
+          cy,
+          (et.splashRadiusSubtiles / SUBTILES_PER_TILE) * CELL,
+          0,
+          Math.PI * 2
+        )
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
     }
 
-    // Body - dimmed only during the initial build.
+    // Body - dimmed only during the initial build. Splash towers are orange,
+    // basic towers blue, so the two kinds read apart at a glance.
     ctx.globalAlpha = initialBuilding ? 0.45 : 1
-    ctx.fillStyle = "#4dabf7"
+    ctx.fillStyle = isSplash ? "#ff922b" : "#4dabf7"
     ctx.fillRect(cx - 16, cy - 16, 32, 32)
-    ctx.fillStyle = "#1864ab"
+    ctx.fillStyle = isSplash ? "#d9480f" : "#1864ab"
     ctx.fillRect(cx - 16, cy - 16, 32, 6)
 
     // Level pips - from the predicted tower (et) so a new pip appears exactly
@@ -294,18 +358,38 @@ function draw(
       }
     }
 
-    ctx.beginPath()
-    ctx.fillStyle = "#ff8787"
-    ctx.arc(cx, cy, 10, 0, Math.PI * 2)
-    ctx.fill()
+    const style = enemyStyle(u.enemyKind)
+    const r = style.radius
 
-    // HP bar.
-    const w = 22
+    // Boss: outer gold ring to make it unmistakable.
+    if (style.boss) {
+      ctx.beginPath()
+      ctx.strokeStyle = "#ffd43b"
+      ctx.lineWidth = 3
+      ctx.arc(cx, cy, r + 3, 0, Math.PI * 2)
+      ctx.stroke()
+      ctx.lineWidth = 1
+    }
+
+    ctx.beginPath()
+    ctx.fillStyle = style.fill
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.beginPath()
+    ctx.strokeStyle = style.stroke
+    ctx.lineWidth = 2
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.lineWidth = 1
+
+    // HP bar, sized to the marker so a boss's bar isn't tiny.
+    const w = Math.max(22, r * 2 + 4)
+    const barY = cy - r - 8
     const hpFrac = u.maxHp > 0 ? u.hp / u.maxHp : 0
     ctx.fillStyle = "#2b2f3a"
-    ctx.fillRect(cx - w / 2, cy - 18, w, 4)
+    ctx.fillRect(cx - w / 2, barY, w, 4)
     ctx.fillStyle = "#69db7c"
-    ctx.fillRect(cx - w / 2, cy - 18, w * hpFrac, 4)
+    ctx.fillRect(cx - w / 2, barY, w * hpFrac, 4)
   }
 }
 
@@ -338,8 +422,14 @@ function drawBlips(
 
 const TowerDefenseBoard = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const { predicted, confirmed, placeTower, upgradeTower, busy } =
-    useTowerDefense()
+  const {
+    predicted,
+    confirmed,
+    placeTower,
+    upgradeTower,
+    busy,
+    selectedKind,
+  } = useTowerDefense()
 
   // Towers come from the confirmed board (so newly built ones show instantly);
   // everything animated comes from the predicted playback board.
@@ -527,8 +617,9 @@ const TowerDefenseBoard = () => {
         console.warn("upgradeTower failed:", err?.message ?? err)
       )
     } else {
-      if (availableGold >= TOWER_BASIC_COST) {
-        blip(`-${TOWER_BASIC_COST} Gold`, BLIP_SPEND_COLOR)
+      const buildCost = towerDef(selectedKind)?.cost ?? 0
+      if (availableGold >= buildCost) {
+        blip(`-${buildCost} Gold`, BLIP_SPEND_COLOR)
       } else {
         blip("Not enough gold", BLIP_SPEND_COLOR)
       }

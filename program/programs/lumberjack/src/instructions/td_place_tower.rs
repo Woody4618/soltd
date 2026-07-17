@@ -4,9 +4,15 @@ use crate::state::td_board::*;
 use anchor_lang::prelude::*;
 use session_keys::{Session, SessionToken};
 
-/// Place a new basic tower on tile (x, y). The tower starts building and only
-/// becomes able to shoot at `ready_at_tick = current_tick + TOWER_BUILD_TICKS`.
-pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8) -> Result<()> {
+/// Place a new tower of `kind` on tile (x, y). Stats are pulled from the
+/// `TOWER_DEFS` balance table (kind-agnostic), and the RESOLVED stats are stored
+/// on the tower so a later table change can't retroactively alter it. The tower
+/// starts building and only becomes able to shoot at
+/// `ready_at_tick = current_tick + TOWER_BUILD_TICKS`.
+pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8, kind: u8) -> Result<()> {
+    // Resolve the tower kind's balance row up front (rejects NONE/unknown kinds).
+    let def = *tower_def(kind).ok_or(GameErrorCode::InvalidTower)?;
+
     let board = &mut ctx.accounts.board.load_mut()?;
 
     require!(board.in_bounds(x, y), GameErrorCode::OutOfBounds);
@@ -16,14 +22,11 @@ pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8) -> Result<()> {
         (board.tower_count as usize) < MAX_TOWERS,
         GameErrorCode::TowerLimitReached
     );
-    require!(
-        board.gold >= TOWER_BASIC_COST,
-        GameErrorCode::NotEnoughGold
-    );
+    require!(board.gold >= def.cost, GameErrorCode::NotEnoughGold);
 
     board.gold = board
         .gold
-        .checked_sub(TOWER_BASIC_COST)
+        .checked_sub(def.cost)
         .ok_or(GameErrorCode::NotEnoughGold)?;
 
     let ready_at_tick = board
@@ -33,18 +36,18 @@ pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8) -> Result<()> {
 
     let idx = board.tower_count as usize;
     let tower = &mut board.towers[idx];
-    tower.kind = TOWER_KIND_BASIC;
+    tower.kind = kind;
     tower.level = 1;
     tower.x = x;
     tower.y = y;
-    tower.range_subtiles = TOWER_BASIC_RANGE_SUBTILES;
-    tower.damage = TOWER_BASIC_DAMAGE;
-    tower.cooldown_ticks = TOWER_BASIC_COOLDOWN_TICKS;
+    tower.range_subtiles = def.range_subtiles;
+    tower.damage = def.damage;
+    tower.cooldown_ticks = def.cooldown_ticks;
     tower.pending_level = 0;
     tower._pad2 = [0; 3];
     tower.pending_damage = 0;
     tower.pending_range_subtiles = 0;
-    tower._pad3 = 0;
+    tower.splash_radius_subtiles = def.splash_radius_subtiles;
     tower.last_shot_tick = 0;
     tower.ready_at_tick = ready_at_tick;
 

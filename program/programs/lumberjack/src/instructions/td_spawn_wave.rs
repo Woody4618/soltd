@@ -29,12 +29,15 @@ pub fn spawn_wave(ctx: Context<SpawnWave>, count: u8) -> Result<()> {
             )
             .ok_or(GameErrorCode::GameOver)?;
 
+        // Manual test-only spawn: always NORMAL enemies at their base stats.
+        let def = enemy_def(ENEMY_KIND_NORMAL);
         let unit = &mut board.units[slot];
         unit.state = UNIT_STATE_QUEUED;
-        unit.speed_subtiles = UNIT_BASE_SPEED_SUBTILES;
-        unit.hp = UNIT_BASE_HP;
-        unit.max_hp = UNIT_BASE_HP;
-        unit.reward = UNIT_BASE_REWARD;
+        unit.enemy_kind = ENEMY_KIND_NORMAL;
+        unit.speed_subtiles = def.speed_subtiles;
+        unit.hp = def.hp;
+        unit.max_hp = def.hp;
+        unit.reward = def.reward;
         unit.spawn_tick = spawn_tick;
         unit.progress_subtiles = 0;
 

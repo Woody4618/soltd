@@ -34,26 +34,161 @@ pub const TOWER_BUILD_TICKS: u64 = 30;
 pub const TOWER_UPGRADE_BUILD_TICKS: u64 = 30; // upgrade build delay (same as build)
 pub const UNIT_SPAWN_DELAY_TICKS: u64 = 30;
 
-// Basic tower base stats (level 1). Range is in sub-tiles (2 tiles here).
+// ---------------------------------------------------------------------------
+// Tower definitions (data-driven balance table)
+// ---------------------------------------------------------------------------
+// Each tower KIND has one row in TOWER_DEFS, indexed by its `TOWER_KIND_*` id
+// (minus 1, since kind 0 = NONE). All tower placement/upgrade logic reads its
+// numbers from this table instead of hardcoding a single "basic" tower, so
+// adding a new tower type = add a `TOWER_KIND_*` id + one row here (and a row in
+// the generated TS mirror via `pnpm gen:defs`). Balance is intentionally kept
+// as plain compile-time data; the program is the single source of truth and the
+// TS client is generated from it, so the two can never drift.
+//
+// IMPORTANT: a placed tower stores its RESOLVED stats on the Tower struct, so
+// changing this table + redeploying only affects NEWLY placed towers - in-flight
+// games keep the stats they were built with and never desync.
+#[derive(Clone, Copy)]
+pub struct TowerDef {
+    pub cost: u32,
+    pub range_subtiles: u32,
+    pub damage: u32,
+    pub cooldown_ticks: u32,
+    // AoE splash radius in sub-tiles around the primary target. 0 = single
+    // target. Fixed per kind (upgrades do not grow it).
+    pub splash_radius_subtiles: u32,
+    pub upgrade_cost: u32,
+    pub upgrade_damage_bonus: u32,
+    pub upgrade_range_bonus: u32,
+    pub max_level: u8,
+}
+
+// Number of real tower kinds (excludes TOWER_KIND_NONE). Adding a tower means
+// bumping this and appending to TOWER_DEFS.
+pub const TOWER_KIND_COUNT: usize = 2;
+
+// Balance table. Row order MUST match the `TOWER_KIND_*` ids (row = kind - 1).
 // Hard mode: towers are pricier and hit a bit softer, so raw firepower alone
 // won't carry you - placement and upgrade timing matter.
-pub const TOWER_BASIC_COST: u32 = 60;
-pub const TOWER_BASIC_RANGE_SUBTILES: u32 = 3 * SUBTILES_PER_TILE; // 3-tile radius
-pub const TOWER_BASIC_DAMAGE: u32 = 8;
-pub const TOWER_BASIC_COOLDOWN_TICKS: u32 = 6;
+pub const TOWER_DEFS: [TowerDef; TOWER_KIND_COUNT] = [
+    // kind 1: BASIC. Single-target, long range, cheap, fast. Range in sub-tiles.
+    TowerDef {
+        cost: 60,
+        range_subtiles: 3 * SUBTILES_PER_TILE,
+        damage: 8,
+        cooldown_ticks: 6,
+        splash_radius_subtiles: 0, // single target
+        upgrade_cost: 50,
+        upgrade_damage_bonus: 7,           // added damage per level above 1
+        upgrade_range_bonus: SUBTILES_PER_TILE, // +1 tile / level
+        max_level: 3,
+    },
+    // kind 2: SPLASH. Hits every enemy within splash_radius of its target - great
+    // against clustered waves - but pricier, shorter range and slower firing, so
+    // it trades single-target DPS for area coverage.
+    TowerDef {
+        cost: 100,
+        range_subtiles: 2 * SUBTILES_PER_TILE, // shorter targeting range
+        damage: 6,                             // per-hit; applies to all in splash
+        cooldown_ticks: 9,                     // slower cadence
+        splash_radius_subtiles: SUBTILES_PER_TILE, // 1-tile blast radius
+        upgrade_cost: 70,
+        upgrade_damage_bonus: 5,           // added damage per level above 1
+        upgrade_range_bonus: SUBTILES_PER_TILE, // +1 tile targeting / level
+        max_level: 3,
+    },
+];
 
-// Upgrade scaling per level and its cost.
-pub const TOWER_UPGRADE_COST: u32 = 50;
-pub const TOWER_MAX_LEVEL: u8 = 3;
-pub const TOWER_UPGRADE_DAMAGE_BONUS: u32 = 7; // added damage per level above 1
-pub const TOWER_UPGRADE_RANGE_BONUS: u32 = SUBTILES_PER_TILE; // +1 tile / level
+/// Look up a tower's balance row by its `TOWER_KIND_*` id. Returns None for
+/// TOWER_KIND_NONE or any unknown kind.
+pub const fn tower_def(kind: u8) -> Option<&'static TowerDef> {
+    let idx = (kind as usize).wrapping_sub(1);
+    if kind == 0 || idx >= TOWER_KIND_COUNT {
+        None
+    } else {
+        Some(&TOWER_DEFS[idx])
+    }
+}
 
-// Enemy unit base stats. Hard mode: faster (less time in range) and tankier.
-pub const UNIT_BASE_HP: u32 = 36;
-pub const UNIT_BASE_SPEED_SUBTILES: u32 = 22; // sub-tiles per tick (~12 ticks/tile)
-pub const UNIT_BASE_REWARD: u32 = 7;
 // Ticks between consecutive units in the same wave (so they file in one by one).
 pub const UNIT_SPAWN_STAGGER_TICKS: u64 = 10;
+
+// ---------------------------------------------------------------------------
+// Enemy definitions (data-driven balance table)
+// ---------------------------------------------------------------------------
+// Like TOWER_DEFS, each enemy KIND has one row here indexed by its
+// `ENEMY_KIND_*` id (defined in state/td_board.rs). These are the wave-0 base
+// stats for that type; the per-wave compounding growth below (WAVE_*_GROWTH)
+// is applied ON TOP so late waves stay hard. Adding a new enemy = add a
+// `ENEMY_KIND_*` id + one row here (+ re-run `pnpm gen:defs` for the TS mirror).
+//
+// `radius_px` is a RENDER-ONLY hint (unit marker radius in the client canvas);
+// it is not used by any on-chain logic but lives here so the type is a single
+// source of truth and the client can't drift from the roster.
+#[derive(Clone, Copy)]
+pub struct EnemyDef {
+    pub hp: u32,
+    pub speed_subtiles: u32, // sub-tiles per tick (before per-wave growth)
+    pub reward: u32,
+    pub radius_px: u32, // render-only marker radius
+}
+
+// Number of enemy kinds. Row order MUST match the `ENEMY_KIND_*` ids (row = id).
+pub const ENEMY_KIND_COUNT: usize = 4;
+
+pub const ENEMY_DEFS: [EnemyDef; ENEMY_KIND_COUNT] = [
+    // id 0: NORMAL. Balanced baseline (the old single unit type).
+    EnemyDef {
+        hp: 36,
+        speed_subtiles: 22, // ~12 ticks/tile
+        reward: 7,
+        radius_px: 10,
+    },
+    // id 1: FAST. Low HP, high speed - little time in a tower's range, so it
+    // punishes thin coverage. Pays slightly less.
+    EnemyDef {
+        hp: 22,
+        speed_subtiles: 40,
+        reward: 6,
+        radius_px: 8,
+    },
+    // id 2: STRONG. Tanky and slow - soaks damage and clogs the lane. Pays more
+    // to reward the extra firepower needed to drop it.
+    EnemyDef {
+        hp: 90,
+        speed_subtiles: 14,
+        reward: 14,
+        radius_px: 12,
+    },
+    // id 3: BOSS. Very tanky, slow, and pays a big bounty. Spawns rarely (every
+    // BOSS_WAVE_INTERVAL waves) and takes a wave slot from the normals.
+    EnemyDef {
+        hp: 400,
+        speed_subtiles: 12,
+        reward: 80,
+        radius_px: 16,
+    },
+];
+
+/// Look up an enemy's balance row by its `ENEMY_KIND_*` id. Unknown ids fall
+/// back to NORMAL (index 0) so a bad value can never panic on-chain.
+pub const fn enemy_def(kind: u8) -> &'static EnemyDef {
+    let idx = kind as usize;
+    if idx >= ENEMY_KIND_COUNT {
+        &ENEMY_DEFS[0]
+    } else {
+        &ENEMY_DEFS[idx]
+    }
+}
+
+// A boss enemy is added on every Nth wave (0-indexed): waves 4, 9, 14, ...
+// (i.e. the 5th, 10th, ...). On a boss wave the boss takes one unit slot and
+// the normal fill count is reduced by one (the "replace" model).
+pub const BOSS_WAVE_INTERVAL: u32 = 5;
+
+// Speed cap is applied to the FINAL (post-growth) speed; keep it near a tile so
+// even fast enemies at high waves stay well-behaved for movement/targeting.
+// (UNIT_MAX_SPEED_SUBTILES defined below.)
 
 // ---------------------------------------------------------------------------
 // Automatic waves

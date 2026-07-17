@@ -3,11 +3,43 @@ import { Program } from "@anchor-lang/core";
 import { Lumberjack } from "../target/types/lumberjack";
 import { assert } from "chai";
 import { SessionTokenManager } from "@magicblock-labs/gum-sdk";
-import { applyTicks, fromChain, SimBoard } from "./td_sim";
+import {
+  applyTicks,
+  fromChain,
+  SimBoard,
+  waveEnemyKind,
+  isBossWave,
+  ENEMY_KIND_BOSS,
+  ENEMY_KIND_NORMAL,
+  UNIT_STATE_QUEUED,
+  UNIT_STATE_WALKING,
+} from "./td_sim";
 
 const SESSION_PROGRAM_ID = new anchor.web3.PublicKey(
   "KeyspM2ssCJbqUhQ4k7sveSiY4WjnYsrXkC8oDbwde5"
 );
+
+// Expected balance, mirrored from program/programs/lumberjack/src/constants.rs
+// (STARTING_*, TOWER_DEFS row 0 = basic, UNIT_BASE_*) and .../state/td_board.rs
+// (TOWER_BUILD_TICKS etc). Keep in sync with the Rust source of truth so these
+// assertions verify the on-chain numbers rather than baking in stale copies.
+const STARTING_LIVES = 8;
+const STARTING_GOLD = 200;
+const TOWER_BUILD_TICKS = 30;
+// Basic tower (TOWER_DEFS[0]).
+const BASIC_COST = 60;
+const BASIC_DAMAGE = 8;
+const BASIC_RANGE_SUBTILES = 3 * 256;
+const BASIC_COOLDOWN_TICKS = 6;
+const BASIC_UPGRADE_COST = 50;
+const BASIC_UPGRADE_DAMAGE_BONUS = 7;
+const BASIC_UPGRADE_RANGE_BONUS = 256;
+// Enemy base stats (UNIT_BASE_*).
+const UNIT_BASE_HP = 36;
+const UNIT_BASE_SPEED_SUBTILES = 22;
+const UNIT_BASE_REWARD = 7;
+const UNIT_SPAWN_DELAY_TICKS = 30;
+const UNIT_SPAWN_STAGGER_TICKS = 10;
 
 // The Gum session-token PDA: ["session_token", target_program, session_signer, authority].
 function sessionTokenPDA(
@@ -66,8 +98,8 @@ describe("towerdefense", () => {
     assert.strictEqual(Number(state.currentTick), 0);
     assert.strictEqual(state.gridSize, 8);
     assert.strictEqual(state.towerCount, 0);
-    assert.strictEqual(state.lives, 10);
-    assert.strictEqual(state.gold, 100);
+    assert.strictEqual(state.lives, STARTING_LIVES);
+    assert.strictEqual(state.gold, STARTING_GOLD);
     assert.strictEqual(state.kills, 0);
 
     // Path: (0,0) -> (0,4) -> (7,4) -> (7,7)
@@ -89,7 +121,7 @@ describe("towerdefense", () => {
 
     // Tile (2,2) is off the L-shaped path.
     const sig = await program.methods
-      .placeTower(2, 2)
+      .placeTower(2, 2, 1)
       .accountsPartial({
         board,
         signer: payer.publicKey,
@@ -101,18 +133,18 @@ describe("towerdefense", () => {
 
     const state = await program.account.board.fetch(board);
     assert.strictEqual(state.towerCount, 1);
-    assert.strictEqual(state.gold, 100 - 50); // TOWER_BASIC_COST
+    assert.strictEqual(state.gold, STARTING_GOLD - BASIC_COST);
 
     const tower = state.towers[0];
     assert.strictEqual(tower.kind, 1); // TOWER_KIND_BASIC
     assert.strictEqual(tower.level, 1);
     assert.strictEqual(tower.x, 2);
     assert.strictEqual(tower.y, 2);
-    assert.strictEqual(tower.damage, 10);
-    assert.strictEqual(tower.rangeSubtiles, 2 * 256);
-    assert.strictEqual(tower.cooldownTicks, 5);
-    // Build delay: ready at current_tick (0) + TOWER_BUILD_TICKS (30).
-    assert.strictEqual(Number(tower.readyAtTick), 30);
+    assert.strictEqual(tower.damage, BASIC_DAMAGE);
+    assert.strictEqual(tower.rangeSubtiles, BASIC_RANGE_SUBTILES);
+    assert.strictEqual(tower.cooldownTicks, BASIC_COOLDOWN_TICKS);
+    // Build delay: ready at current_tick (0) + TOWER_BUILD_TICKS.
+    assert.strictEqual(Number(tower.readyAtTick), TOWER_BUILD_TICKS);
   });
 
   it("Rejects a tower on the path", async () => {
@@ -121,7 +153,7 @@ describe("towerdefense", () => {
     let failed = false;
     try {
       await program.methods
-        .placeTower(0, 2)
+        .placeTower(0, 2, 1)
         .accountsPartial({
           board,
           signer: payer.publicKey,
@@ -141,6 +173,31 @@ describe("towerdefense", () => {
   it("Upgrades a tower", async () => {
     const board = boardPDA();
 
+    // A tower can only be upgraded once its INITIAL build has finished
+    // (current_tick >= ready_at_tick == TOWER_BUILD_TICKS). Advance the sim
+    // past the build delay first, letting real time accrue for the tick budget.
+    let advanced = await program.account.board.fetch(board);
+    for (let iter = 100; iter < 116; iter++) {
+      if (Number(advanced.currentTick) >= TOWER_BUILD_TICKS) break;
+      await new Promise((r) => setTimeout(r, 1200));
+      const asig = await program.methods
+        .advanceGame(50, iter)
+        .accountsPartial({
+          sessionToken: null,
+          board,
+          authority: payer.publicKey,
+          signer: payer.publicKey,
+        })
+        .rpc({ skipPreflight: true });
+      await provider.connection.confirmTransaction(asig, "confirmed");
+      advanced = await program.account.board.fetch(board);
+    }
+    assert.isAtLeast(
+      Number(advanced.currentTick),
+      TOWER_BUILD_TICKS,
+      "sim should have advanced past the tower build delay"
+    );
+
     const before = await program.account.board.fetch(board);
     const goldBefore = before.gold;
 
@@ -155,41 +212,72 @@ describe("towerdefense", () => {
       .rpc({ skipPreflight: true });
     await provider.connection.confirmTransaction(sig, "confirmed");
 
+    // Upgrades are DEFERRED: on submit the boosted stats land in pending_* and
+    // ready_at_tick moves forward; current stats stay until the build commits.
     const state = await program.account.board.fetch(board);
     const tower = state.towers[0];
-    assert.strictEqual(tower.level, 2);
-    assert.strictEqual(tower.damage, 10 + 8); // base + upgrade bonus
-    assert.strictEqual(tower.rangeSubtiles, 2 * 256 + 128); // +0.5 tile
-    assert.strictEqual(state.gold, goldBefore - 40); // TOWER_UPGRADE_COST
+    assert.strictEqual(tower.level, 1, "level stays until upgrade commits");
+    assert.strictEqual(tower.pendingLevel, 2);
+    assert.strictEqual(tower.pendingDamage, BASIC_DAMAGE + BASIC_UPGRADE_DAMAGE_BONUS);
+    assert.strictEqual(
+      tower.pendingRangeSubtiles,
+      BASIC_RANGE_SUBTILES + BASIC_UPGRADE_RANGE_BONUS
+    );
+    assert.strictEqual(state.gold, goldBefore - BASIC_UPGRADE_COST);
   });
 
   it("Queues a wave of units with staggered spawn ticks", async () => {
-    const board = boardPDA();
+    // Fresh, isolated board so spawn ticks are relative to a known tick (0) and
+    // aren't affected by advances/auto-waves from earlier tests on the shared
+    // board.
+    const owner = anchor.web3.Keypair.generate();
+    const air = await provider.connection.requestAirdrop(owner.publicKey, 1e9);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [board] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("board"), owner.publicKey.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .initBoard()
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
 
     const sig = await program.methods
       .spawnWave(3)
-      .accountsPartial({ board, signer: payer.publicKey })
+      .accountsPartial({ board, signer: owner.publicKey })
+      .signers([owner])
       .rpc({ skipPreflight: true });
     await provider.connection.confirmTransaction(sig, "confirmed");
 
     const state = await program.account.board.fetch(board);
     assert.strictEqual(Number(state.nextUnitId), 3);
+    assert.strictEqual(Number(state.currentTick), 0);
 
     // Units queued (state == 1), with base stats and staggered spawn ticks.
-    // current_tick is still 0 (no advance yet); base spawn = 0 + 30.
+    // current_tick is 0 (fresh board); base spawn = 0 + UNIT_SPAWN_DELAY_TICKS.
     const queued = state.units.filter((u) => u.state === 1);
     assert.strictEqual(queued.length, 3);
 
     for (let i = 0; i < 3; i++) {
       const u = state.units[i];
       assert.strictEqual(u.state, 1); // UNIT_STATE_QUEUED
-      assert.strictEqual(u.hp, 30);
-      assert.strictEqual(u.maxHp, 30);
-      assert.strictEqual(u.speedSubtiles, 16);
-      assert.strictEqual(u.reward, 5);
+      assert.strictEqual(u.hp, UNIT_BASE_HP);
+      assert.strictEqual(u.maxHp, UNIT_BASE_HP);
+      assert.strictEqual(u.speedSubtiles, UNIT_BASE_SPEED_SUBTILES);
+      assert.strictEqual(u.reward, UNIT_BASE_REWARD);
       assert.strictEqual(Number(u.progressSubtiles), 0);
-      // spawn_tick = 30 (delay) + i * 10 (stagger)
-      assert.strictEqual(Number(u.spawnTick), 30 + i * 10);
+      // spawn_tick = UNIT_SPAWN_DELAY_TICKS + i * UNIT_SPAWN_STAGGER_TICKS
+      assert.strictEqual(
+        Number(u.spawnTick),
+        UNIT_SPAWN_DELAY_TICKS + i * UNIT_SPAWN_STAGGER_TICKS
+      );
     }
   });
 
@@ -299,7 +387,7 @@ describe("towerdefense", () => {
     // Tower at (1,0): adjacent to path start (0,0), range 2 tiles covers the
     // first path segment. Cost 50, gold 100 -> 50 left.
     await program.methods
-      .placeTower(1, 0)
+      .placeTower(1, 0, 1)
       .accountsPartial({
         board,
         signer: owner.publicKey,
@@ -309,16 +397,22 @@ describe("towerdefense", () => {
       .signers([owner])
       .rpc({ skipPreflight: true });
 
-    // One unit. spawn_tick = 30, hp 30, reward 5.
+    const goldAfterBuild = STARTING_GOLD - BASIC_COST;
+
+    // One unit of base stats.
     await program.methods
       .spawnWave(1)
       .accountsPartial({ board, signer: owner.publicKey })
       .signers([owner])
       .rpc({ skipPreflight: true });
 
-    // Advance until the unit is dead or we run long enough.
+    // Advance until the unit is dead or we run long enough. The tower arms at
+    // TOWER_BUILD_TICKS and then fires every BASIC_COOLDOWN_TICKS for
+    // BASIC_DAMAGE; with the unit inside a 3-tile range on the first segment it
+    // gets killed well before leaking. We assert the deterministic OUTCOME
+    // (dead + reward bookkeeping) rather than a brittle exact kill tick.
     let state = await program.account.board.fetch(board);
-    for (let iter = 0; iter < 20; iter++) {
+    for (let iter = 0; iter < 24; iter++) {
       await new Promise((r) => setTimeout(r, 1200));
       const sig = await program.methods
         .advanceGame(50, iter)
@@ -333,27 +427,134 @@ describe("towerdefense", () => {
       await provider.connection.confirmTransaction(sig, "confirmed");
       state = await program.account.board.fetch(board);
       if (state.units[0].state === 3 /* DEAD */) break;
-      if (Number(state.currentTick) >= 70) break;
+      if (Number(state.currentTick) >= 120) break;
     }
 
     const unit = state.units[0];
-    // Tower is built by tick 30. The unit becomes WALKING during tick 30's
-    // movement pass (after that tick's shot resolution), so the tower first
-    // sees it at tick 31 and fires: ticks 31, 36, 41 (cooldown 5) -> 3 shots *
-    // 10 dmg = 30 = full HP. The unit dies at tick 41 while still in range on
-    // the first path segment.
     assert.strictEqual(unit.state, 3, "unit should be dead"); // UNIT_STATE_DEAD
     assert.strictEqual(unit.hp, 0);
     assert.strictEqual(state.kills, 1);
-    // gold: 100 - 50 (tower) + 5 (kill reward) = 55.
-    assert.strictEqual(state.gold, 55);
+    // No lives lost (killed before reaching the end).
+    assert.strictEqual(state.lives, STARTING_LIVES);
+    // gold: after building the tower, +BASIC reward for the one kill.
+    assert.strictEqual(state.gold, goldAfterBuild + UNIT_BASE_REWARD);
 
-    // Tower's last shot must be the killing tick (>= ready) and a multiple of
-    // the cadence from tick 30.
+    // Tower's last shot must be at/after it armed.
     const lastShot = Number(state.towers[0].lastShotTick);
-    assert.isAtLeast(lastShot, 30);
+    assert.isAtLeast(lastShot, TOWER_BUILD_TICKS);
 
     console.log("Unit killed; last shot tick", lastShot, "kills", state.kills);
+  });
+
+  it("Splash tower damages multiple enemies and matches the client sim", async () => {
+    // Fresh, isolated board.
+    const owner = anchor.web3.Keypair.generate();
+    const air = await provider.connection.requestAirdrop(owner.publicKey, 1e9);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [board] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("board"), owner.publicKey.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .initBoard()
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    // Place a SPLASH tower (kind 2) at (1,0), next to the path start so the
+    // first path segment sits inside both its range and its blast radius.
+    await program.methods
+      .placeTower(1, 0, 2)
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        authority: owner.publicKey,
+        sessionToken: null,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    const placed = await program.account.board.fetch(board);
+    const splashTower = placed.towers[0];
+    assert.strictEqual(splashTower.kind, 2, "kind should be splash");
+    // Splash radius must be set on-chain (repurposed from the old pad field).
+    assert.isAbove(
+      Number(splashTower.splashRadiusSubtiles),
+      0,
+      "splash tower must have a splash radius"
+    );
+
+    await program.methods
+      .spawnWave(4)
+      .accountsPartial({ board, signer: owner.publicKey })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    // Snapshot into the client sim, then advance on-chain in slices and require
+    // the sim to reproduce the board bit-for-bit (this exercises the splash math
+    // in both places). Also track the max number of enemies damaged by a single
+    // shot to prove the AoE actually hit multiple units.
+    const start = await program.account.board.fetch(board);
+    const predicted: SimBoard = fromChain(start);
+    let tickBefore = Number(start.currentTick);
+    let sawMultiHit = false;
+    let prevHps = start.units.map((u) => u.hp);
+
+    let acc = start;
+    for (let iter = 200; iter < 216; iter++) {
+      await new Promise((r) => setTimeout(r, 1200));
+      const sig = await program.methods
+        .advanceGame(50, iter)
+        .accountsPartial({
+          sessionToken: null,
+          board,
+          authority: owner.publicKey,
+          signer: owner.publicKey,
+        })
+        .signers([owner])
+        .rpc({ skipPreflight: true });
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      acc = await program.account.board.fetch(board);
+
+      // How many units lost HP since the last snapshot? A splash shot hitting a
+      // cluster drops several at once.
+      let damagedThisSlice = 0;
+      for (let i = 0; i < acc.units.length; i++) {
+        if (acc.units[i].hp < prevHps[i]) damagedThisSlice += 1;
+      }
+      if (damagedThisSlice >= 2) sawMultiHit = true;
+      prevHps = acc.units.map((u) => u.hp);
+
+      const applied = Number(acc.currentTick) - tickBefore;
+      tickBefore = Number(acc.currentTick);
+      if (applied > 0) applyTicks(predicted, applied);
+
+      // Parity: splash damage must be identical client-side and on-chain.
+      const chain = fromChain(acc);
+      assert.strictEqual(predicted.kills, chain.kills, "kills parity");
+      assert.strictEqual(predicted.gold, chain.gold, "gold parity");
+      for (let i = 0; i < predicted.units.length; i++) {
+        assert.strictEqual(
+          predicted.units[i].hp,
+          chain.units[i].hp,
+          `unit ${i} hp parity`
+        );
+      }
+
+      if (Number(acc.currentTick) >= 80) break;
+    }
+
+    assert.isTrue(
+      sawMultiHit,
+      "splash tower should damage 2+ enemies in a single slice"
+    );
+    console.log("Splash parity held; kills", acc.kills);
   });
 
   it("Advances via a session key and rejects a wrong authority", async () => {
@@ -480,7 +681,7 @@ describe("towerdefense", () => {
 
     // Two towers covering the first path segment so shots factor into parity.
     await program.methods
-      .placeTower(1, 1)
+      .placeTower(1, 1, 1)
       .accountsPartial({
         board,
         signer: owner.publicKey,
@@ -490,7 +691,7 @@ describe("towerdefense", () => {
       .signers([owner])
       .rpc({ skipPreflight: true });
     await program.methods
-      .placeTower(1, 3)
+      .placeTower(1, 3, 1)
       .accountsPartial({
         board,
         signer: owner.publicKey,
@@ -549,6 +750,167 @@ describe("towerdefense", () => {
       predicted.gold
     );
   });
+
+  it("Auto-waves spawn mixed enemy types matching the client roster", async () => {
+    // Fresh, tower-free board so units survive long enough to inspect their
+    // types (no shots), and so the auto-wave lands on a known schedule.
+    const owner = anchor.web3.Keypair.generate();
+    const air = await provider.connection.requestAirdrop(owner.publicKey, 1e9);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [board] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("board"), owner.publicKey.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .initBoard()
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    // Advance past WAVE_FIRST_DELAY_TICKS (40) so wave 0 spawns.
+    let acc = await program.account.board.fetch(board);
+    for (let iter = 0; iter < 8 && Number(acc.waveNumber) < 1; iter++) {
+      await new Promise((r) => setTimeout(r, 1200));
+      const sig = await program.methods
+        .advanceGame(30, iter)
+        .accountsPartial({
+          sessionToken: null,
+          board,
+          authority: owner.publicKey,
+          signer: owner.publicKey,
+        })
+        .signers([owner])
+        .rpc({ skipPreflight: true });
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      acc = await program.account.board.fetch(board);
+    }
+    assert.isAtLeast(Number(acc.waveNumber), 1, "wave 0 should have spawned");
+
+    // The first wave (n = 0) enemy kinds must match the deterministic roster
+    // from wave_enemy_kind(0, i). Units are placed in slot order = spawn order.
+    const onchainKinds = acc.units
+      .filter(
+        (u) => u.state === UNIT_STATE_QUEUED || u.state === UNIT_STATE_WALKING
+      )
+      .map((u) => u.enemyKind);
+    assert.isAtLeast(onchainKinds.length, 1, "expected queued/walking units");
+    onchainKinds.forEach((k, i) => {
+      assert.strictEqual(
+        k,
+        waveEnemyKind(0, i),
+        `wave-0 unit ${i} kind should match client roster`
+      );
+    });
+    // Wave 0 is not a boss wave, so no boss should be present yet.
+    assert.isFalse(isBossWave(0));
+    assert.isFalse(
+      onchainKinds.includes(ENEMY_KIND_BOSS),
+      "wave 0 must not contain a boss"
+    );
+    // A varied roster: not every unit is NORMAL (fast/strong are mixed in).
+    assert.isTrue(
+      onchainKinds.some((k) => k !== ENEMY_KIND_NORMAL),
+      "wave 0 should contain at least one non-normal enemy"
+    );
+
+    // Client parity: mirror and step forward one slice; kinds + stats match.
+    const predicted: SimBoard = fromChain(acc);
+    let before = Number(acc.currentTick);
+    await new Promise((r) => setTimeout(r, 1200));
+    const sig = await program.methods
+      .advanceGame(20, 100)
+      .accountsPartial({
+        sessionToken: null,
+        board,
+        authority: owner.publicKey,
+        signer: owner.publicKey,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    acc = await program.account.board.fetch(board);
+    const applied = Number(acc.currentTick) - before;
+    if (applied > 0) applyTicks(predicted, applied);
+    assertBoardsEqual(predicted, fromChain(acc));
+
+    console.log(
+      "Wave-0 enemy roster:",
+      onchainKinds.join(","),
+      "| client parity held through tick",
+      Number(acc.currentTick)
+    );
+  });
+
+  it("Boss wave produces a boss with scaled HP (client sim)", () => {
+    // Reaching the 5th wave on-chain would require a long real-time run (the
+    // tick budget is wall-clock gated), so verify the boss roster + stats via
+    // the client sim - which is proven bit-identical to the program by the
+    // parity tests above. Boss waves are n = 4, 9, ... (every 5th).
+    assert.isTrue(isBossWave(4), "wave index 4 (5th wave) is a boss wave");
+    assert.strictEqual(
+      waveEnemyKind(4, 0),
+      ENEMY_KIND_BOSS,
+      "first unit of a boss wave is the boss"
+    );
+    // A boss's HP compounds with the wave like any enemy but off a much larger
+    // base (400), so it should dwarf a normal unit in the same wave.
+    const bossBoard: SimBoard = {
+      currentTick: 0,
+      lives: 8,
+      gold: 200,
+      kills: 0,
+      // Jump straight to the boss wave so spawnAutoWave uses n = 4.
+      waveNumber: 4,
+      nextWaveTick: 1,
+      pathLen: 4,
+      path: [
+        { x: 0, y: 0 },
+        { x: 0, y: 4 },
+        { x: 7, y: 4 },
+        { x: 7, y: 7 },
+      ],
+      towerCount: 0,
+      towers: [],
+      units: Array.from({ length: 16 }, () => ({
+        state: 0,
+        enemyKind: 0,
+        speedSubtiles: 0,
+        hp: 0,
+        maxHp: 0,
+        reward: 0,
+        spawnTick: 0,
+        progressSubtiles: 0,
+      })),
+    };
+    // One tick reaches nextWaveTick (1) and spawns the wave.
+    applyTicks(bossBoard, 1);
+    const boss = bossBoard.units.find((u) => u.enemyKind === ENEMY_KIND_BOSS);
+    assert.isDefined(boss, "boss should have spawned");
+    const normal = bossBoard.units.find(
+      (u) => u.enemyKind === ENEMY_KIND_NORMAL && u.state !== 0
+    );
+    assert.isDefined(normal, "a normal should also be in the boss wave");
+    assert.isAbove(
+      boss!.hp,
+      normal!.hp * 3,
+      "boss HP should dwarf a normal in the same wave"
+    );
+    assert.isAbove(boss!.reward, 80, "boss reward should be a big bounty");
+    console.log(
+      "Boss-wave boss hp",
+      boss!.hp,
+      "reward",
+      boss!.reward,
+      "vs normal hp",
+      normal!.hp
+    );
+  });
 });
 
 function assertBoardsEqual(a: SimBoard, b: SimBoard) {
@@ -564,6 +926,12 @@ function assertBoardsEqual(a: SimBoard, b: SimBoard) {
   for (let i = 0; i < a.units.length; i++) {
     assert.strictEqual(a.units[i].state, b.units[i].state, `unit ${i} state`);
     assert.strictEqual(a.units[i].hp, b.units[i].hp, `unit ${i} hp`);
+    assert.strictEqual(
+      a.units[i].enemyKind,
+      b.units[i].enemyKind,
+      `unit ${i} enemyKind`
+    );
+    assert.strictEqual(a.units[i].reward, b.units[i].reward, `unit ${i} reward`);
     assert.strictEqual(
       a.units[i].progressSubtiles,
       b.units[i].progressSubtiles,

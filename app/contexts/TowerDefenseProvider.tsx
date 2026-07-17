@@ -28,6 +28,8 @@ import {
   TOWER_UPGRADE_BUILD_TICKS,
   TOWER_UPGRADE_DAMAGE_BONUS,
   TOWER_UPGRADE_RANGE_BONUS,
+  TOWER_KIND_BASIC,
+  towerDef,
 } from "@/utils/anchor"
 import {
   SimBoard,
@@ -57,10 +59,13 @@ interface TowerDefenseContextValue {
   boardExists: boolean
   autoAdvance: boolean
   setAutoAdvance: (v: boolean) => void
+  // Tower kind selected in the build menu; used for click-to-place.
+  selectedKind: number
+  setSelectedKind: (kind: number) => void
   busy: boolean
   initBoard: () => Promise<void>
   resetBoard: () => Promise<void>
-  placeTower: (x: number, y: number) => Promise<void>
+  placeTower: (x: number, y: number, kind?: number) => Promise<void>
   upgradeTower: (towerIndex: number) => Promise<void>
   advance: () => Promise<void>
   refresh: () => Promise<void>
@@ -74,6 +79,8 @@ const TowerDefenseContext = createContext<TowerDefenseContextValue>({
   boardExists: false,
   autoAdvance: false,
   setAutoAdvance: () => {},
+  selectedKind: TOWER_KIND_BASIC,
+  setSelectedKind: () => {},
   busy: false,
   initBoard: async () => {},
   resetBoard: async () => {},
@@ -126,12 +133,65 @@ export const TowerDefenseProvider = ({
     [toast]
   )
 
+  // The on-chain SessionToken stores `valid_until` (unix seconds) at byte
+  // offset 8 + 32*3 = 104. Reading it raw lets us reject a session action
+  // BEFORE sending a doomed transaction (expired or already-closed token).
+  const SESSION_VALID_UNTIL_OFFSET = 8 + 32 * 3
+  const sessionTokenValid = useCallback(
+    async (tokenStr: string): Promise<boolean> => {
+      try {
+        const info = await connection.getAccountInfo(new PublicKey(tokenStr))
+        if (!info || info.data.length < SESSION_VALID_UNTIL_OFFSET + 8) {
+          return false // account gone => expired/revoked
+        }
+        const view = new DataView(
+          info.data.buffer,
+          info.data.byteOffset,
+          info.data.byteLength
+        )
+        const validUntil = Number(
+          view.getBigInt64(SESSION_VALID_UNTIL_OFFSET, true)
+        )
+        return validUntil > Math.floor(Date.now() / 1000)
+      } catch {
+        // On an RPC hiccup, don't block the action - let the chain decide.
+        return true
+      }
+    },
+    [connection]
+  )
+
+  // Called when a session-signed action can't proceed because the session is
+  // invalid. Stops the auto-run loop (so we don't spam failures) and tells the
+  // player to renew it via the button up top.
+  const handleSessionInvalid = useCallback(() => {
+    setAutoAdvance(false)
+    notify(
+      "Your session expired. Click Renew session at the top to keep playing without wallet popups."
+    )
+  }, [notify])
+
+  // Heuristic: does this error look like a session-key rejection (expired /
+  // revoked token, or authority mismatch from the session gate)?
+  const isSessionError = useCallback((e: any): boolean => {
+    const msg = (e?.message ?? String(e ?? "")).toLowerCase()
+    return (
+      msg.includes("session") ||
+      msg.includes("wrongauthority") ||
+      msg.includes("account does not exist") ||
+      msg.includes("could not find") ||
+      msg.includes("invalidtoken") ||
+      msg.includes("notoken")
+    )
+  }, [])
+
   const [boardPDA, setBoardPDA] = useState<PublicKey | null>(null)
   const [confirmed, setConfirmed] = useState<SimBoard | null>(null)
   const [predicted, setPredicted] = useState<SimBoard | null>(null)
   const [hasBoard, setHasBoard] = useState(false)
   const [boardExists, setBoardExists] = useState(false)
   const [autoAdvance, setAutoAdvance] = useState(false)
+  const [selectedKind, setSelectedKind] = useState<number>(TOWER_KIND_BASIC)
   const [busy, setBusy] = useState(false)
 
   // Smooth playback model.
@@ -402,16 +462,19 @@ export const TowerDefenseProvider = ({
           else break
         }
 
-        // Garbage-collect optimistic upgrade overlays that the CONFIRMED board
-        // now reflects (the real pending upgrade landed) or that no longer point
-        // at a valid tower. Doing this against confirmed truth (not on tx return)
-        // means the overlay lives exactly until the real bar can take over, with
-        // no gap where neither is shown.
-        const confTruth = latestRef.current
-        if (pendingUpgradesRef.current.size > 0 && confTruth) {
+        // Garbage-collect optimistic upgrade overlays. Critical: only drop an
+        // overlay once the board we're actually about to RENDER (the `anchor`,
+        // i.e. the newest confirmed board <= playTick) already carries the real
+        // pending upgrade - NOT merely when the latest confirmed board does. The
+        // latest confirmed board can be AHEAD of playback (the settle looks
+        // ahead), so if we dropped the overlay based on it while the render
+        // anchor is still an older pre-upgrade board, the bar would vanish until
+        // playback caught up. This is what made a 2nd rapid upgrade's bar
+        // disappear. We also drop overlays whose tower slot is gone/empty.
+        if (pendingUpgradesRef.current.size > 0) {
           pendingUpgradesRef.current.forEach((idx) => {
-            const ct = confTruth.towers[idx]
-            if (!ct || ct.kind === 0 || ct.pendingLevel !== 0) {
+            const at = anchor.towers[idx]
+            if (!at || at.kind === 0 || at.pendingLevel !== 0) {
               pendingUpgradesRef.current.delete(idx)
             }
           })
@@ -677,8 +740,13 @@ export const TowerDefenseProvider = ({
   )
 
   const placeTower = useCallback(
-    async (x: number, y: number) => {
+    async (x: number, y: number, kind: number = selectedKind) => {
       if (!publicKey || !boardPDA) return
+      const def = towerDef(kind)
+      if (!def) {
+        notify("Unknown tower type.")
+        return
+      }
       // Guards mirror the program but against the PREDICTED board, since the
       // bundled advance_game will settle the chain up to that state first, so
       // the predicted gold is what the build will actually be able to spend.
@@ -688,9 +756,9 @@ export const TowerDefenseProvider = ({
           notify("Tower limit reached — you can't build any more towers.")
           return
         }
-        if (board.gold < TOWER_BASIC_COST) {
+        if (board.gold < def.cost) {
           notify(
-            `Not enough gold to build (need ${TOWER_BASIC_COST}, have ${board.gold}). Kill enemies to earn more.`
+            `Not enough gold to build (need ${def.cost}, have ${board.gold}). Kill enemies to earn more.`
           )
           return
         }
@@ -701,13 +769,17 @@ export const TowerDefenseProvider = ({
           sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
         if (hasSession) {
           // Session path: the ephemeral key signs for the board authority, so
-          // no wallet popup.
+          // no wallet popup. Verify it's still valid first.
+          if (!(await sessionTokenValid(sessionWallet.sessionToken as string))) {
+            handleSessionInvalid()
+            return
+          }
           const settleIxs = await buildSettleIxs(
             sessionWallet.publicKey!,
             sessionWallet.sessionToken as unknown as PublicKey
           )
           const tx = await program.methods
-            .placeTower(x, y)
+            .placeTower(x, y, kind)
             .accountsPartial({
               sessionToken: sessionWallet.sessionToken,
               board: boardPDA,
@@ -720,7 +792,7 @@ export const TowerDefenseProvider = ({
         } else {
           const settleIxs = await buildSettleIxs(publicKey, null)
           const tx = await program.methods
-            .placeTower(x, y)
+            .placeTower(x, y, kind)
             .accountsPartial({
               sessionToken: null,
               board: boardPDA,
@@ -733,7 +805,11 @@ export const TowerDefenseProvider = ({
         }
         await refresh()
       } catch (e) {
-        reportError("Place tower failed", e)
+        if (isSessionError(e)) {
+          handleSessionInvalid()
+        } else {
+          reportError("Place tower failed", e)
+        }
       } finally {
         setBusy(false)
       }
@@ -741,6 +817,7 @@ export const TowerDefenseProvider = ({
     [
       publicKey,
       boardPDA,
+      selectedKind,
       sessionWallet,
       sendMain,
       refresh,
@@ -748,6 +825,9 @@ export const TowerDefenseProvider = ({
       notify,
       confirmedRef,
       buildSettleIxs,
+      sessionTokenValid,
+      handleSessionInvalid,
+      isSessionError,
     ]
   )
 
@@ -810,6 +890,10 @@ export const TowerDefenseProvider = ({
         const hasSession =
           sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
         if (hasSession) {
+          if (!(await sessionTokenValid(sessionWallet.sessionToken as string))) {
+            handleSessionInvalid()
+            return
+          }
           const settleIxs = await buildSettleIxs(
             sessionWallet.publicKey!,
             sessionWallet.sessionToken as unknown as PublicKey
@@ -849,7 +933,11 @@ export const TowerDefenseProvider = ({
         // collects the entry once the CONFIRMED tower shows the upgrade - so the
         // bar hands off seamlessly from optimistic to real.
       } catch (e) {
-        reportError("Upgrade tower failed", e)
+        if (isSessionError(e)) {
+          handleSessionInvalid()
+        } else {
+          reportError("Upgrade tower failed", e)
+        }
         // Failed: nothing landed on-chain, so remove the optimistic bar now.
         pendingUpgradesRef.current.delete(towerIndex)
       } finally {
@@ -866,6 +954,9 @@ export const TowerDefenseProvider = ({
       notify,
       confirmedRef,
       buildSettleIxs,
+      sessionTokenValid,
+      handleSessionInvalid,
+      isSessionError,
     ]
   )
 
@@ -891,6 +982,12 @@ export const TowerDefenseProvider = ({
       const hasSession =
         sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
       if (hasSession) {
+        // Bail out before sending if the session already lapsed - avoids a
+        // guaranteed on-chain failure and lets the player renew.
+        if (!(await sessionTokenValid(sessionWallet.sessionToken as string))) {
+          handleSessionInvalid()
+          return
+        }
         const tx = await program.methods
           .advanceGame(MAX_TICKS_PER_SLICE, counter)
           .accountsPartial({
@@ -918,8 +1015,10 @@ export const TowerDefenseProvider = ({
       }
       await refresh()
     } catch (e: any) {
-      // Only surface a toast for a manual advance; the auto-run loop would spam.
-      if (!autoAdvance) {
+      if (isSessionError(e)) {
+        handleSessionInvalid()
+      } else if (!autoAdvance) {
+        // Only surface a toast for a manual advance; the auto-run loop spams.
         reportError("Advance failed", e)
       } else {
         console.warn("advance_game failed:", e?.message ?? e)
@@ -927,7 +1026,18 @@ export const TowerDefenseProvider = ({
     } finally {
       advancingRef.current = false
     }
-  }, [publicKey, boardPDA, sessionWallet, sendMain, refresh, autoAdvance, reportError])
+  }, [
+    publicKey,
+    boardPDA,
+    sessionWallet,
+    sendMain,
+    refresh,
+    autoAdvance,
+    reportError,
+    sessionTokenValid,
+    handleSessionInvalid,
+    isSessionError,
+  ])
 
   // Stop auto-run as soon as the confirmed board is game over.
   useEffect(() => {
@@ -956,6 +1066,8 @@ export const TowerDefenseProvider = ({
       boardExists,
       autoAdvance,
       setAutoAdvance,
+      selectedKind,
+      setSelectedKind,
       busy,
       initBoard,
       resetBoard,
@@ -971,6 +1083,7 @@ export const TowerDefenseProvider = ({
       hasBoard,
       boardExists,
       autoAdvance,
+      selectedKind,
       busy,
       initBoard,
       resetBoard,

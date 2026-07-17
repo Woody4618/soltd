@@ -21,7 +21,30 @@ import {
 import { useWallet } from "@solana/wallet-adapter-react"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
-import { TOWER_BASIC_COST, TOWER_UPGRADE_COST } from "@/utils/anchor"
+import {
+  TOWER_BASIC_COST,
+  TOWER_UPGRADE_COST,
+  TOWER_DEFS,
+  TOWER_KIND_BASIC,
+  TOWER_KIND_SPLASH,
+} from "@/utils/anchor"
+
+// Build-menu entries. Costs come from the generated TOWER_DEFS table so they
+// can't drift from the program. `accent` matches the on-board tower colour.
+const TOWER_MENU = [
+  {
+    kind: TOWER_KIND_BASIC,
+    name: "Basic",
+    desc: "Single target, long range",
+    accent: "#4dabf7",
+  },
+  {
+    kind: TOWER_KIND_SPLASH,
+    name: "Splash",
+    desc: "AoE — hits nearby enemies",
+    accent: "#ff922b",
+  },
+]
 
 const TowerDefensePanel = () => {
   const { publicKey } = useWallet()
@@ -34,6 +57,8 @@ const TowerDefensePanel = () => {
     busy,
     autoAdvance,
     setAutoAdvance,
+    selectedKind,
+    setSelectedKind,
     initBoard,
     resetBoard,
     advance,
@@ -150,10 +175,46 @@ const TowerDefensePanel = () => {
         </Badge>
       )}
 
-      <Text fontSize="xs" color="gray.400">
-        Click an empty tile to build a tower ({TOWER_BASIC_COST}g). Click one of
-        your towers to upgrade it ({TOWER_UPGRADE_COST}g).
-      </Text>
+      {/* Build menu: pick which tower a tile-click places. */}
+      <Box borderTop="1px solid #2b2f3a" pt={2}>
+        <Text fontSize="xs" color="gray.400" mb={1}>
+          Build (click a tile to place)
+        </Text>
+        <SimpleGrid columns={2} spacing={2}>
+          {TOWER_MENU.map((m) => {
+            const cost = TOWER_DEFS[m.kind - 1]?.cost ?? 0
+            const active = selectedKind === m.kind
+            return (
+              <Button
+                key={m.kind}
+                size="sm"
+                height="auto"
+                py={1.5}
+                variant={active ? "solid" : "outline"}
+                borderColor={m.accent}
+                bg={active ? m.accent : "transparent"}
+                color={active ? "#0f1117" : m.accent}
+                _hover={{ bg: active ? m.accent : "#1a1d27" }}
+                isDisabled={gameOver}
+                onClick={() => setSelectedKind(m.kind)}
+              >
+                <VStack spacing={0} lineHeight={1.15}>
+                  <Text fontSize="sm" fontWeight="bold">
+                    {m.name}
+                  </Text>
+                  <Text fontSize="10px" opacity={0.9}>
+                    {cost}g
+                  </Text>
+                </VStack>
+              </Button>
+            )
+          })}
+        </SimpleGrid>
+        <Text fontSize="10px" color="gray.500" mt={1}>
+          {TOWER_MENU.find((m) => m.kind === selectedKind)?.desc}. Click a tower
+          to upgrade it ({TOWER_UPGRADE_COST}g).
+        </Text>
+      </Box>
 
       {/* Advance controls */}
       <Box borderTop="1px solid #2b2f3a" pt={2}>
@@ -213,9 +274,11 @@ const TowerDefensePanel = () => {
                 advance itself without a wallet popup each tick.
               </ListItem>
               <ListItem>
-                <b>Build towers:</b> click any empty (dark) tile to place a tower
-                for {TOWER_BASIC_COST} gold. You can’t build on the orange{" "}
-                <b>path</b> tiles.
+                <b>Build towers:</b> pick a type in the <b>Build</b> menu, then
+                click any empty (dark) tile to place it. <b>Basic</b> (
+                {TOWER_BASIC_COST}g) is a long-range single-target shooter;{" "}
+                <b>Splash</b> hits every enemy near its target — great for
+                clustered waves. You can’t build on the orange <b>path</b> tiles.
               </ListItem>
               <ListItem>
                 Towers take ~3s to build before they shoot, then fire at the enemy
@@ -225,6 +288,14 @@ const TowerDefensePanel = () => {
                 <b>Waves are automatic:</b> escalating waves spawn on a cooldown —
                 each stronger and worth more gold. Clear a wave early and the
                 next one arrives after a short breather.
+              </ListItem>
+              <ListItem>
+                <b>Enemy types:</b> <b style={{ color: "#ff8787" }}>Normal</b>{" "}
+                (balanced), <b style={{ color: "#ffd43b" }}>Fast</b> (small,
+                quick — hard to hit), <b style={{ color: "#9775fa" }}>Strong</b>{" "}
+                (tanky, slow, pays more), and a{" "}
+                <b style={{ color: "#f03e3e" }}>Boss</b> (gold ring) every 5th
+                wave — huge HP and a big bounty.
               </ListItem>
               <ListItem>
                 <b>Advance:</b> flip on <b>Auto-run</b> (needs a session) or tap{" "}

@@ -4,6 +4,7 @@ use anchor_lang::prelude::*;
 // Tower kinds. Stored as u8 in zero-copy structs (enums-with-data are not Pod).
 pub const TOWER_KIND_NONE: u8 = 0;
 pub const TOWER_KIND_BASIC: u8 = 1;
+pub const TOWER_KIND_SPLASH: u8 = 2;
 
 // Unit status flags stored as u8.
 pub const UNIT_STATE_EMPTY: u8 = 0; // slot unused
@@ -11,6 +12,14 @@ pub const UNIT_STATE_QUEUED: u8 = 1; // spawned, waiting for spawn_tick
 pub const UNIT_STATE_WALKING: u8 = 2; // moving along the path
 pub const UNIT_STATE_DEAD: u8 = 3; // killed by a tower
 pub const UNIT_STATE_REACHED_END: u8 = 4; // reached the end of the path (leaked)
+
+// Enemy kinds. Stored as u8 on the Unit. Each kind has one row in ENEMY_DEFS
+// (constants.rs), indexed by its id. Kind 0 = NORMAL so an all-zero (freshly
+// zeroed) unit slot decodes as a plain normal unit.
+pub const ENEMY_KIND_NORMAL: u8 = 0;
+pub const ENEMY_KIND_FAST: u8 = 1;
+pub const ENEMY_KIND_STRONG: u8 = 2;
+pub const ENEMY_KIND_BOSS: u8 = 3;
 
 /// A single waypoint on the deterministic path, in grid tile coordinates.
 #[zero_copy]
@@ -41,7 +50,11 @@ pub struct Tower {
     pub _pad2: [u8; 3],
     pub pending_damage: u32, // damage after the in-progress upgrade
     pub pending_range_subtiles: u32, // range after the in-progress upgrade
-    pub _pad3: u32,          // keep the following u64 fields 8-byte aligned
+    // AoE radius in sub-tiles around the primary target. 0 = single-target
+    // (basic tower). Fixed per kind; NOT changed by upgrades. Occupies the u32
+    // slot that used to be _pad3, so the account layout/size is unchanged and
+    // existing on-chain boards stay valid without a realloc.
+    pub splash_radius_subtiles: u32,
     pub last_shot_tick: u64, // tick of the last shot fired (0 = never)
     pub ready_at_tick: u64,  // tick the build/upgrade finishes (stats commit)
 }
@@ -53,7 +66,11 @@ pub struct Tower {
 #[repr(C)]
 pub struct Unit {
     pub state: u8, // UNIT_STATE_*
-    pub _pad: [u8; 3],
+    // Enemy type (ENEMY_KIND_*). Occupies the first byte of what used to be
+    // pure padding, so the Unit layout/size is unchanged and existing on-chain
+    // boards stay valid. NORMAL == 0 means an old/zeroed unit reads as normal.
+    pub enemy_kind: u8,
+    pub _pad: [u8; 2],
     pub speed_subtiles: u32, // sub-tiles travelled per tick
     pub hp: u32,
     pub max_hp: u32,
@@ -210,13 +227,43 @@ impl Board {
         raw.min(MAX_UNITS as u32)
     }
 
-    /// Per-unit stats for wave `n` (0-indexed): (hp, speed_subtiles, reward).
-    /// Difficulty COMPOUNDS: each wave multiplies the base by (100+growth)/100,
-    /// applied `n` times with integer math (dividing every step keeps values
-    /// small and overflow-free, and is bit-identical to the TS client which
-    /// runs the exact same loop). A u64 accumulator with a hard cap makes this
-    /// safe for arbitrarily deep runs.
-    pub fn wave_unit_stats(n: u32) -> (u32, u32, u32) {
+    /// Is wave `n` (0-indexed) a boss wave? True on every BOSS_WAVE_INTERVAL-th
+    /// wave (n = 4, 9, 14, ... => the 5th, 10th, ...). Wave 0 never has a boss.
+    pub fn is_boss_wave(n: u32) -> bool {
+        n > 0 && (n + 1) % BOSS_WAVE_INTERVAL == 0
+    }
+
+    /// Deterministic enemy type for the `index`-th unit spawned in wave `n`.
+    /// Pure function of (n, index) so the client reproduces the exact roster.
+    ///
+    /// - On a boss wave the FIRST unit is the BOSS (it takes a normal's slot -
+    ///   the "replace" model), the rest use the standard mix.
+    /// - The standard mix is a fixed repeating pattern (rotated by wave number
+    ///   so successive waves aren't identical) with a growing share of tougher
+    ///   types as waves climb.
+    pub fn wave_enemy_kind(n: u32, index: u32) -> u8 {
+        if Self::is_boss_wave(n) && index == 0 {
+            return ENEMY_KIND_BOSS;
+        }
+        // Rotate the pattern by wave so the lineup shifts each wave.
+        match (index + n) % 6 {
+            2 | 5 => ENEMY_KIND_FAST,
+            3 => ENEMY_KIND_STRONG,
+            // From wave 4 onward, promote one more slot to STRONG for pressure.
+            0 if n >= 4 => ENEMY_KIND_STRONG,
+            _ => ENEMY_KIND_NORMAL,
+        }
+    }
+
+    /// Per-unit stats for a given enemy `kind` in wave `n` (0-indexed):
+    /// (hp, speed_subtiles, reward). The enemy type supplies the wave-0 base
+    /// (from ENEMY_DEFS); difficulty then COMPOUNDS per wave: each wave
+    /// multiplies the base by (100+growth)/100, applied `n` times with integer
+    /// math (dividing every step keeps values small and overflow-free, and is
+    /// bit-identical to the TS client which runs the exact same loop). A u64
+    /// accumulator with a hard cap makes this safe for arbitrarily deep runs.
+    pub fn wave_unit_stats(n: u32, kind: u8) -> (u32, u32, u32) {
+        let def = enemy_def(kind);
         // Iteratively compound `base` by `growth_pct` for `n` waves, clamped to
         // `cap` so a very deep run can never overflow a u32 stat.
         let compound = |base: u32, growth_pct: u32, cap: u64| -> u64 {
@@ -232,15 +279,15 @@ impl Board {
             }
             v.min(cap)
         };
-        let hp = compound(UNIT_BASE_HP, WAVE_HP_GROWTH_PERCENT, u32::MAX as u64).max(1) as u32;
+        let hp = compound(def.hp, WAVE_HP_GROWTH_PERCENT, u32::MAX as u64).max(1) as u32;
         let speed = (compound(
-            UNIT_BASE_SPEED_SUBTILES,
+            def.speed_subtiles,
             WAVE_SPEED_GROWTH_PERCENT,
             UNIT_MAX_SPEED_SUBTILES as u64,
         ) as u32)
             .max(1)
             .min(UNIT_MAX_SPEED_SUBTILES);
-        let reward = compound(UNIT_BASE_REWARD, WAVE_REWARD_GROWTH_PERCENT, u32::MAX as u64) as u32;
+        let reward = compound(def.reward, WAVE_REWARD_GROWTH_PERCENT, u32::MAX as u64) as u32;
         (hp, speed, reward)
     }
 
@@ -249,7 +296,6 @@ impl Board {
     fn spawn_auto_wave(&mut self, base_tick: u64) {
         let n = self.wave_number;
         let count = Self::wave_unit_count(n);
-        let (hp, speed, reward) = Self::wave_unit_stats(n);
 
         let mut spawned: u64 = 0;
         let mut placed: u32 = 0;
@@ -258,10 +304,15 @@ impl Board {
                 Some(s) => s,
                 None => break, // board full; skip the rest of this wave
             };
+            // Enemy type + stats are a pure function of (wave, index-in-wave),
+            // so the client reproduces the exact roster and stat block.
+            let kind = Self::wave_enemy_kind(n, placed);
+            let (hp, speed, reward) = Self::wave_unit_stats(n, kind);
             let spawn_tick =
                 base_tick.saturating_add(spawned.saturating_mul(UNIT_SPAWN_STAGGER_TICKS));
             let unit = &mut self.units[slot];
             unit.state = UNIT_STATE_QUEUED;
+            unit.enemy_kind = kind;
             unit.speed_subtiles = speed;
             unit.hp = hp;
             unit.max_hp = hp;
@@ -393,6 +444,23 @@ impl Board {
         }
     }
 
+    /// Apply `dmg` to the unit at `idx`, marking it dead and awarding its
+    /// reward + a kill if its hp reaches 0. Only touches walking units that are
+    /// still alive; a no-op otherwise. Deterministic.
+    fn damage_unit(&mut self, idx: usize, dmg: u32) {
+        let unit = &mut self.units[idx];
+        if unit.state != UNIT_STATE_WALKING {
+            return;
+        }
+        unit.hp = unit.hp.saturating_sub(dmg);
+        if unit.hp == 0 {
+            unit.state = UNIT_STATE_DEAD;
+            let reward = unit.reward;
+            self.gold = self.gold.saturating_add(reward);
+            self.kills = self.kills.saturating_add(1);
+        }
+    }
+
     /// Resolve tower shots for a single tick. Deterministic: towers iterate in
     /// fixed index order and target the walking unit that is FURTHEST along the
     /// path (largest `progress_subtiles`) within range, breaking ties by lowest
@@ -451,14 +519,38 @@ impl Board {
 
             if let Some(target) = best {
                 let dmg = tower.damage;
-                let unit = &mut self.units[target];
-                unit.hp = unit.hp.saturating_sub(dmg);
-                if unit.hp == 0 {
-                    unit.state = UNIT_STATE_DEAD;
-                    let reward = unit.reward;
-                    self.gold = self.gold.saturating_add(reward);
-                    self.kills = self.kills.saturating_add(1);
+
+                // Apply `dmg` to a single unit, handling kill bookkeeping.
+                // Inlined as a closure-free helper via a small loop below so we
+                // can reuse it for the primary hit and every splash victim while
+                // keeping deterministic iteration order.
+                self.damage_unit(target, dmg);
+
+                // Splash: also damage every OTHER walking unit within
+                // splash_radius of the PRIMARY TARGET's position. Deterministic:
+                // fixed unit-index order, integer squared-distance, same `dmg`.
+                // splash_radius == 0 (basic tower) skips this entirely so its
+                // behaviour is byte-for-byte unchanged.
+                let splash = tower.splash_radius_subtiles as i64;
+                if splash > 0 {
+                    let (cx, cy) = positions[target];
+                    let splash_sq = splash.saturating_mul(splash);
+                    let mut si = 0usize;
+                    while si < MAX_UNITS {
+                        if si != target && self.units[si].state == UNIT_STATE_WALKING {
+                            let (ux, uy) = positions[si];
+                            let dx = ux - cx;
+                            let dy = uy - cy;
+                            let dist_sq =
+                                dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+                            if dist_sq <= splash_sq {
+                                self.damage_unit(si, dmg);
+                            }
+                        }
+                        si += 1;
+                    }
                 }
+
                 self.towers[ti].last_shot_tick = tick;
             }
 

@@ -23,6 +23,8 @@ pub fn upgrade_tower(ctx: Context<UpgradeTower>, tower_index: u8) -> Result<()> 
         board.towers[idx].kind != TOWER_KIND_NONE,
         GameErrorCode::InvalidTower
     );
+    // Upgrade scaling comes from the tower kind's balance row.
+    let def = *tower_def(board.towers[idx].kind).ok_or(GameErrorCode::InvalidTower)?;
     // Reject if an upgrade is already in progress for this tower.
     require!(
         board.towers[idx].pending_level == 0,
@@ -37,17 +39,14 @@ pub fn upgrade_tower(ctx: Context<UpgradeTower>, tower_index: u8) -> Result<()> 
         GameErrorCode::TowerNotReady
     );
     require!(
-        board.towers[idx].level < TOWER_MAX_LEVEL,
+        board.towers[idx].level < def.max_level,
         GameErrorCode::InvalidTower
     );
-    require!(
-        board.gold >= TOWER_UPGRADE_COST,
-        GameErrorCode::NotEnoughGold
-    );
+    require!(board.gold >= def.upgrade_cost, GameErrorCode::NotEnoughGold);
 
     board.gold = board
         .gold
-        .checked_sub(TOWER_UPGRADE_COST)
+        .checked_sub(def.upgrade_cost)
         .ok_or(GameErrorCode::NotEnoughGold)?;
 
     let ready_at_tick = current_tick
@@ -61,11 +60,11 @@ pub fn upgrade_tower(ctx: Context<UpgradeTower>, tower_index: u8) -> Result<()> 
         .ok_or(GameErrorCode::InvalidTower)?;
     tower.pending_damage = tower
         .damage
-        .checked_add(TOWER_UPGRADE_DAMAGE_BONUS)
+        .checked_add(def.upgrade_damage_bonus)
         .ok_or(GameErrorCode::InvalidTower)?;
     tower.pending_range_subtiles = tower
         .range_subtiles
-        .checked_add(TOWER_UPGRADE_RANGE_BONUS)
+        .checked_add(def.upgrade_range_bonus)
         .ok_or(GameErrorCode::InvalidTower)?;
     tower.ready_at_tick = ready_at_tick;
 

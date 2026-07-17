@@ -2,6 +2,17 @@ import { Program, IdlAccounts, BN } from "@anchor-lang/core"
 import { Lumberjack, IDL } from "../idl/lumberjack"
 import { clusterApiUrl, Connection, PublicKey } from "@solana/web3.js"
 import { WrappedConnection } from "./wrappedConnection";
+import { TOWER_DEFS, TOWER_KIND_BASIC, towerDef } from "./tdDefs"
+
+// Re-export the generated balance table so callers have a single import site.
+export {
+  TOWER_DEFS,
+  TOWER_KIND_NONE,
+  TOWER_KIND_BASIC,
+  TOWER_KIND_SPLASH,
+  towerDef,
+} from "./tdDefs"
+export type { TowerDef } from "./tdDefs"
 
 export const CONNECTION = new WrappedConnection(process.env.NEXT_PUBLIC_RPC ? process.env.NEXT_PUBLIC_RPC : 'https://rpc.magicblock.app/devnet',  {
   wsEndpoint: process.env.NEXT_PUBLIC_WSS_RPC ? process.env.NEXT_PUBLIC_WSS_RPC : "wss://rpc.magicblock.app/devnet",
@@ -55,14 +66,20 @@ export const GRID_SIZE = 8
 export const SUBTILES_PER_TILE = 256
 export const MS_PER_TICK = 100 // 10 ticks / second
 export const MAX_TICKS_PER_SLICE = 256
-export const TOWER_BASIC_COST = 60
-export const TOWER_UPGRADE_COST = 50
-export const TOWER_MAX_LEVEL = 3
 export const MAX_TOWERS = 16
 export const TOWER_BUILD_TICKS = 30 // ticks from placement until a tower arms
 export const TOWER_UPGRADE_BUILD_TICKS = 30 // ticks for an upgrade to take effect
-export const TOWER_UPGRADE_DAMAGE_BONUS = 7 // added damage per level above 1
-export const TOWER_UPGRADE_RANGE_BONUS = SUBTILES_PER_TILE // +1 tile per level
+
+// Per-kind stats now live in the generated TOWER_DEFS table. These scalar
+// aliases (basic tower = kind 1) preserve the existing call sites while the UI
+// still assumes a single build-menu tower; multi-kind UI can read TOWER_DEFS
+// directly.
+const BASIC = TOWER_DEFS[TOWER_KIND_BASIC - 1]
+export const TOWER_BASIC_COST = BASIC.cost
+export const TOWER_UPGRADE_COST = BASIC.upgradeCost
+export const TOWER_MAX_LEVEL = BASIC.maxLevel
+export const TOWER_UPGRADE_DAMAGE_BONUS = BASIC.upgradeDamageBonus
+export const TOWER_UPGRADE_RANGE_BONUS = BASIC.upgradeRangeBonus
 
 // Board PDA: ["board", authority].
 export function boardPda(authority: PublicKey): PublicKey {

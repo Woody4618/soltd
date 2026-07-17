@@ -49,8 +49,8 @@ pub mod lumberjack {
         ctx.accounts.board.load()?.authority == ctx.accounts.signer.key(),
         GameErrorCode::WrongAuthority
     )]
-    pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8) -> Result<()> {
-        td_place_tower::place_tower(ctx, x, y)
+    pub fn place_tower(ctx: Context<PlaceTower>, x: u8, y: u8, kind: u8) -> Result<()> {
+        td_place_tower::place_tower(ctx, x, y, kind)
     }
 
     #[session_auth_or(

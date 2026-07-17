@@ -9,8 +9,26 @@
 
 export const SUBTILES_PER_TILE = 256
 
-export const TOWER_KIND_NONE = 0
-export const TOWER_KIND_BASIC = 1
+// Tower + enemy kind ids and the enemy balance table come from the generated
+// mirror (single source of truth, kept in sync with the program by codegen).
+import {
+  TOWER_KIND_NONE,
+  TOWER_KIND_BASIC,
+  ENEMY_KIND_NORMAL,
+  ENEMY_KIND_FAST,
+  ENEMY_KIND_STRONG,
+  ENEMY_KIND_BOSS,
+  BOSS_WAVE_INTERVAL,
+  enemyDef,
+} from "./tdDefs"
+export {
+  TOWER_KIND_NONE,
+  TOWER_KIND_BASIC,
+  ENEMY_KIND_NORMAL,
+  ENEMY_KIND_FAST,
+  ENEMY_KIND_STRONG,
+  ENEMY_KIND_BOSS,
+}
 
 export const UNIT_STATE_EMPTY = 0
 export const UNIT_STATE_QUEUED = 1
@@ -21,9 +39,6 @@ export const UNIT_STATE_REACHED_END = 4
 // Mirror of constants.rs. MUST stay in sync with the program so client
 // prediction reproduces auto-waves bit-for-bit.
 const MAX_UNITS = 16
-const UNIT_BASE_HP = 36
-const UNIT_BASE_SPEED_SUBTILES = 22
-const UNIT_BASE_REWARD = 7
 const UNIT_SPAWN_STAGGER_TICKS = 10
 const UNIT_MAX_SPEED_SUBTILES = SUBTILES_PER_TILE
 
@@ -52,6 +67,8 @@ export interface SimTower {
   rangeSubtiles: number
   damage: number
   cooldownTicks: number
+  // AoE splash radius in sub-tiles around the target. 0 = single target.
+  splashRadiusSubtiles: number
   // Pending upgrade (deferred like the initial build). 0 = none.
   pendingLevel: number
   pendingDamage: number
@@ -62,6 +79,7 @@ export interface SimTower {
 
 export interface SimUnit {
   state: number
+  enemyKind: number
   speedSubtiles: number
   hp: number
   maxHp: number
@@ -89,11 +107,36 @@ function waveUnitCount(n: number): number {
   return Math.min(WAVE_BASE_COUNT + n * WAVE_COUNT_GROWTH, MAX_UNITS)
 }
 
-// Per-unit stats for wave n: [hp, speedSubtiles, reward]. COMPOUNDING growth,
-// mirroring the program's integer loop exactly: multiply by (100+g)/100 and
-// floor each wave. Values stay well under 2^53 so plain numbers match Rust u64.
+// Is wave n (0-indexed) a boss wave? Mirror of Board::is_boss_wave.
+export function isBossWave(n: number): boolean {
+  return n > 0 && (n + 1) % BOSS_WAVE_INTERVAL === 0
+}
+
+// Enemy type for the `index`-th unit spawned in wave n. Pure function of
+// (n, index) - mirror of Board::wave_enemy_kind.
+export function waveEnemyKind(n: number, index: number): number {
+  if (isBossWave(n) && index === 0) return ENEMY_KIND_BOSS
+  switch ((index + n) % 6) {
+    case 2:
+    case 5:
+      return ENEMY_KIND_FAST
+    case 3:
+      return ENEMY_KIND_STRONG
+    case 0:
+      return n >= 4 ? ENEMY_KIND_STRONG : ENEMY_KIND_NORMAL
+    default:
+      return ENEMY_KIND_NORMAL
+  }
+}
+
+// Per-unit stats for enemy `kind` in wave n: [hp, speedSubtiles, reward]. The
+// type supplies the wave-0 base (from the generated ENEMY_DEFS); COMPOUNDING
+// per-wave growth is applied on top, mirroring the program's integer loop
+// exactly (multiply by (100+g)/100 and floor each wave). Values stay well under
+// 2^53 so plain numbers match Rust u64.
 const U32_MAX = 4294967295
-function waveUnitStats(n: number): [number, number, number] {
+function waveUnitStats(n: number, kind: number): [number, number, number] {
+  const def = enemyDef(kind)
   const compound = (base: number, growthPct: number, cap: number): number => {
     const mult = 100 + growthPct
     let v = base
@@ -103,19 +146,19 @@ function waveUnitStats(n: number): [number, number, number] {
     }
     return Math.min(v, cap)
   }
-  const hp = Math.max(1, compound(UNIT_BASE_HP, WAVE_HP_GROWTH_PERCENT, U32_MAX))
+  const hp = Math.max(1, compound(def.hp, WAVE_HP_GROWTH_PERCENT, U32_MAX))
   const speed = Math.min(
     UNIT_MAX_SPEED_SUBTILES,
     Math.max(
       1,
       compound(
-        UNIT_BASE_SPEED_SUBTILES,
+        def.speedSubtiles,
         WAVE_SPEED_GROWTH_PERCENT,
         UNIT_MAX_SPEED_SUBTILES
       )
     )
   )
-  const reward = compound(UNIT_BASE_REWARD, WAVE_REWARD_GROWTH_PERCENT, U32_MAX)
+  const reward = compound(def.reward, WAVE_REWARD_GROWTH_PERCENT, U32_MAX)
   return [hp, speed, reward]
 }
 
@@ -138,14 +181,16 @@ function freeUnitSlot(board: SimBoard): number {
 function spawnAutoWave(board: SimBoard, baseTick: number): void {
   const n = board.waveNumber
   const count = waveUnitCount(n)
-  const [hp, speed, reward] = waveUnitStats(n)
   let spawned = 0
   let placed = 0
   while (placed < count) {
     const slot = freeUnitSlot(board)
     if (slot === -1) break
+    const kind = waveEnemyKind(n, placed)
+    const [hp, speed, reward] = waveUnitStats(n, kind)
     const u = board.units[slot]
     u.state = UNIT_STATE_QUEUED
+    u.enemyKind = kind
     u.speedSubtiles = speed
     u.hp = hp
     u.maxHp = hp
@@ -259,27 +304,52 @@ function applyTickShots(
     }
 
     if (best !== -1) {
-      const unit = board.units[best]
-      const dealt = Math.min(unit.hp, tower.damage)
-      unit.hp = Math.max(0, unit.hp - tower.damage)
-      const killed = unit.hp === 0
-      if (killed) {
-        unit.state = UNIT_STATE_DEAD
-        board.gold += unit.reward
-        board.kills += 1
+      // Apply `tower.damage` to a unit (walking + alive only), handling kill
+      // bookkeeping and emitting a ShotEvent. Mirrors Board::damage_unit.
+      const damageUnit = (idx: number) => {
+        const u = board.units[idx]
+        if (u.state !== UNIT_STATE_WALKING) return
+        const dealt = Math.min(u.hp, tower.damage)
+        u.hp = Math.max(0, u.hp - tower.damage)
+        const killed = u.hp === 0
+        if (killed) {
+          u.state = UNIT_STATE_DEAD
+          board.gold += u.reward
+          board.kills += 1
+        }
+        if (onShot) {
+          onShot({
+            tick,
+            towerIndex: ti,
+            towerX: tower.x,
+            towerY: tower.y,
+            unitIndex: idx,
+            damage: dealt,
+            killed,
+          })
+        }
       }
+
+      damageUnit(best)
+
+      // Splash: also hit every OTHER walking unit within splashRadius of the
+      // PRIMARY TARGET's position. Mirror of the program (fixed index order,
+      // integer squared distance, same damage). splashRadius === 0 skips it.
+      const splash = tower.splashRadiusSubtiles
+      if (splash > 0) {
+        const [cx, cy] = positionAt(board, board.units[best].progressSubtiles)
+        const splashSq = splash * splash
+        for (let si = 0; si < board.units.length; si++) {
+          if (si === best) continue
+          if (board.units[si].state !== UNIT_STATE_WALKING) continue
+          const [ux, uy] = positionAt(board, board.units[si].progressSubtiles)
+          const dx = ux - cx
+          const dy = uy - cy
+          if (dx * dx + dy * dy <= splashSq) damageUnit(si)
+        }
+      }
+
       board.towers[ti].lastShotTick = tick
-      if (onShot) {
-        onShot({
-          tick,
-          towerIndex: ti,
-          towerX: tower.x,
-          towerY: tower.y,
-          unitIndex: best,
-          damage: dealt,
-          killed,
-        })
-      }
     }
   }
 }
@@ -370,6 +440,7 @@ export function fromChain(acc: any): SimBoard {
       rangeSubtiles: num(t.rangeSubtiles),
       damage: num(t.damage),
       cooldownTicks: num(t.cooldownTicks),
+      splashRadiusSubtiles: num(t.splashRadiusSubtiles),
       pendingLevel: num(t.pendingLevel),
       pendingDamage: num(t.pendingDamage),
       pendingRangeSubtiles: num(t.pendingRangeSubtiles),
@@ -378,6 +449,7 @@ export function fromChain(acc: any): SimBoard {
     })),
     units: acc.units.map((u: any) => ({
       state: num(u.state),
+      enemyKind: num(u.enemyKind),
       speedSubtiles: num(u.speedSubtiles),
       hp: num(u.hp),
       maxHp: num(u.maxHp),

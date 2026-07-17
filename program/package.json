@@ -1,5 +1,6 @@
 {
     "scripts": {
+        "gen:defs": "node scripts/gen-defs.js",
         "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
         "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
     },
