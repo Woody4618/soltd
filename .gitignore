@@ -1,0 +1,20 @@
+# Root safety-net ignores (subfolders also have their own .gitignore).
+
+# Secrets / local env
+.env
+.env.local
+.env*.local
+*.pem
+
+# Solana / Anchor keypairs and build output
+**/target/
+**/.anchor/
+**/test-ledger/
+*-keypair.json
+id.json
+
+# Node
+**/node_modules/
+
+# OS
+.DS_Store

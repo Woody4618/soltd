@@ -1,0 +1,904 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  SendTransactionError,
+  SystemProgram,
+} from "@solana/web3.js"
+import { useConnection, useWallet } from "@solana/wallet-adapter-react"
+import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
+import { useToast } from "@chakra-ui/react"
+import {
+  program,
+  boardPda,
+  MS_PER_TICK,
+  MAX_TICKS_PER_SLICE,
+  MAX_TOWERS,
+  TOWER_BASIC_COST,
+  TOWER_UPGRADE_COST,
+  TOWER_MAX_LEVEL,
+  TOWER_UPGRADE_BUILD_TICKS,
+  TOWER_UPGRADE_DAMAGE_BONUS,
+  TOWER_UPGRADE_RANGE_BONUS,
+} from "@/utils/anchor"
+import {
+  SimBoard,
+  applyTicks,
+  cloneBoard,
+  fromChain,
+} from "@/utils/tdSim"
+
+// Extra ticks added to a bundled "settle" advance (before build/upgrade) to
+// cover the transaction round-trip. During confirmation local playback keeps
+// moving at ~10 ticks/s; ~10 ticks (~1s) makes the confirmed settle tick land
+// near where playback will actually be, so it re-anchors as a forward step
+// instead of clamping backwards. The program's own real-time budget still caps
+// how many ticks actually apply, so this never fast-forwards past real time.
+const SETTLE_LOOKAHEAD_TICKS = 10
+
+interface TowerDefenseContextValue {
+  boardPDA: PublicKey | null
+  // Latest confirmed on-chain board.
+  confirmed: SimBoard | null
+  // Board to render: the confirmed state, smoothly caught up from the previous
+  // confirmed tick. Never advanced past the latest confirmed on-chain tick.
+  predicted: SimBoard | null
+  hasBoard: boolean
+  // The board account exists on-chain (may or may not decode into the current
+  // layout). Used to offer a Reset for stale/old-layout accounts.
+  boardExists: boolean
+  autoAdvance: boolean
+  setAutoAdvance: (v: boolean) => void
+  busy: boolean
+  initBoard: () => Promise<void>
+  resetBoard: () => Promise<void>
+  placeTower: (x: number, y: number) => Promise<void>
+  upgradeTower: (towerIndex: number) => Promise<void>
+  advance: () => Promise<void>
+  refresh: () => Promise<void>
+}
+
+const TowerDefenseContext = createContext<TowerDefenseContextValue>({
+  boardPDA: null,
+  confirmed: null,
+  predicted: null,
+  hasBoard: false,
+  boardExists: false,
+  autoAdvance: false,
+  setAutoAdvance: () => {},
+  busy: false,
+  initBoard: async () => {},
+  resetBoard: async () => {},
+  placeTower: async () => {},
+  upgradeTower: async () => {},
+  advance: async () => {},
+  refresh: async () => {},
+})
+
+export const useTowerDefense = () => useContext(TowerDefenseContext)
+
+export const TowerDefenseProvider = ({
+  children,
+}: {
+  children: React.ReactNode
+}) => {
+  const { publicKey, sendTransaction } = useWallet()
+  const { connection } = useConnection()
+  const sessionWallet = useSessionWallet()
+  const toast = useToast()
+
+  // Surface an on-chain failure to the user with the real program logs, and
+  // log the full detail to the console for debugging.
+  const reportError = useCallback(
+    (label: string, e: any) => {
+      const msg = e?.message ?? String(e)
+      console.error(`${label}:`, e)
+      toast({
+        title: label,
+        description: msg,
+        status: "error",
+        duration: 12000,
+        isClosable: true,
+      })
+    },
+    [toast]
+  )
+
+  // A lightweight, non-error notice (e.g. a client-side rule caught before we
+  // bother the chain with a doomed transaction).
+  const notify = useCallback(
+    (msg: string) => {
+      toast({
+        description: msg,
+        status: "warning",
+        duration: 4000,
+        isClosable: true,
+      })
+    },
+    [toast]
+  )
+
+  const [boardPDA, setBoardPDA] = useState<PublicKey | null>(null)
+  const [confirmed, setConfirmed] = useState<SimBoard | null>(null)
+  const [predicted, setPredicted] = useState<SimBoard | null>(null)
+  const [hasBoard, setHasBoard] = useState(false)
+  const [boardExists, setBoardExists] = useState(false)
+  const [autoAdvance, setAutoAdvance] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  // Smooth playback model.
+  //
+  // The naive "reset the animation timer on every account update" approach
+  // snaps: confirmations arrive in bursts and each one jumps the target forward
+  // and restarts the clock, so the units teleport to the end of the latest
+  // slice. Instead we run a FREE-RUNNING local playback clock (`playbackTick`)
+  // that advances at real time and only ever eases UP toward the latest
+  // confirmed tick (a moving ceiling) - it never resets or jumps backward.
+  //
+  // We keep a small buffer of recent confirmed boards (sorted by tick). Each
+  // frame we pick the newest confirmed board whose tick <= playbackTick as the
+  // deterministic simulation anchor and run the exact on-chain tick loop from
+  // there up to floor(playbackTick). Because we periodically re-anchor on a
+  // real confirmed board, any float drift self-corrects and we never render a
+  // tick the chain hasn't actually computed.
+  const confirmedBufRef = useRef<SimBoard[]>([]) // sorted ascending by tick
+  const latestRef = useRef<SimBoard | null>(null) // most recent confirmed board
+  const ceilingTickRef = useRef<number>(0) // latest CONFIRMED tick (chain truth)
+  const playbackTickRef = useRef<number>(0) // free-running local position
+  const lastFrameRef = useRef<number>(0) // wall-clock of previous frame
+  // Wall-clock (performance.now) when the latest forward-confirmed board arrived.
+  // Playback may LEAD the confirmed tick, but only by as much real time as has
+  // actually elapsed since that confirm - because the program grants at most
+  // `elapsed_seconds * 10` ticks (its anti-cheat budget). Predicting further
+  // than that would show ticks the chain will refuse, causing a snap-back. So
+  // the render loop clamps playback to `confirmedTick + min(SLICE, elapsed*10)`.
+  const confirmedAtRef = useRef<number>(0)
+  const advancingRef = useRef(false)
+  // Monotonic nonce fed to advance_game (its `counter` arg) so back-to-back
+  // advances/settles produce distinct tx signatures.
+  const advanceCounterRef = useRef(0)
+  // Tower indices with an in-flight (optimistic) UPGRADE. Applied onto the
+  // predicted board each frame so the cyan upgrade bar APPEARS the instant you
+  // click - but pinned at 0% (readyAtTick kept a full build-time ahead every
+  // frame) until the program responds with the real start tick on the confirmed
+  // board, at which point the bar begins filling. Cleared once the confirmed
+  // board reflects the pending upgrade (predicted derives it) or the action ends.
+  const pendingUpgradesRef = useRef<Set<number>>(new Set())
+  // Set true while a reset is in flight. reset_board rewinds the on-chain tick
+  // to 0, but a lagging RPC/subscription can still deliver the PRE-reset board
+  // (high tick, old units) a moment later. Treated as a forward step, that would
+  // re-introduce the old enemies. While this guard is on we ignore any confirmed
+  // board that isn't the fresh tick-0 state; it clears once we've seen tick 0.
+  const awaitingResetRef = useRef(false)
+
+  // confirmedRef is the source of truth for game logic (lives/gameover checks).
+  const confirmedRef = latestRef
+
+  // Mirrors the latest predicted playback board so imperative callbacks (build /
+  // upgrade guards, settle) can read it synchronously without waiting on state.
+  const predictedRef = useRef<SimBoard | null>(null)
+  const pushPredicted = useCallback((sim: SimBoard | null) => {
+    predictedRef.current = sim
+    setPredicted(sim)
+  }, [])
+
+  const applyConfirmed = useCallback((sim: SimBoard) => {
+    // While a reset is pending, drop any stale pre-reset board (high tick / old
+    // units) that a lagging RPC may still push. Accept only the fresh tick-0
+    // board, which clears the guard.
+    if (awaitingResetRef.current) {
+      if (sim.currentTick !== 0) return
+      awaitingResetRef.current = false
+    }
+
+    const prevLatest = latestRef.current
+
+    if (!prevLatest || sim.currentTick < prevLatest.currentTick) {
+      // First load or a rewind (e.g. reset to tick 0): snap the whole playback
+      // model to this state and start the real-time budget window now.
+      confirmedBufRef.current = [sim]
+      playbackTickRef.current = sim.currentTick
+      ceilingTickRef.current = sim.currentTick
+      confirmedAtRef.current = performance.now()
+    } else if (sim.currentTick === prevLatest.currentTick) {
+      // SAME tick, new content (e.g. a tower was placed/upgraded - those
+      // instructions mutate state without advancing time). Merge the new board
+      // WITHOUT touching the free-running playback clock, so we don't snap the
+      // animation forward. Any confirmed board still ahead of playback keeps
+      // its future ticks; we just refresh the entries at/after this tick.
+      const buf = confirmedBufRef.current
+      const merged = buf.filter((b) => b.currentTick < sim.currentTick)
+      merged.push(sim)
+      confirmedBufRef.current = merged
+      // Ceiling unchanged (same tick). Playback keeps flowing.
+    } else {
+      // Forward step: just raise the ceiling and remember the board. Playback
+      // keeps flowing at real time toward the new ceiling - no reset, no jump.
+      const buf = confirmedBufRef.current
+      buf.push(sim)
+      // Drop confirmed boards we've already animated past (keep the last one
+      // <= playbackTick as the anchor, plus everything ahead of playback).
+      const pt = playbackTickRef.current
+      let keepFrom = 0
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i].currentTick <= pt) keepFrom = i
+      }
+      confirmedBufRef.current = buf.slice(keepFrom)
+      ceilingTickRef.current = sim.currentTick
+      // Restart the real-time lead budget so playback keeps flowing from this
+      // fresh confirmed tick. BUT: a settle advance (bundled before a build /
+      // upgrade) usually confirms a tick that is still BEHIND our free-running
+      // playback, because the network round-trip let playback move on. If we
+      // naively reset the budget window to `now`, the lead ceiling would snap
+      // down to this (behind) confirmed tick and the render loop would clamp
+      // playback BACKWARDS - the tiny "stuck" hitch. So we back-date the budget
+      // window just enough that the ceiling still covers the current playback
+      // position, i.e. we never yank playback below where it already is.
+      const nowMs = performance.now()
+      const leadTicks = Math.max(0, pt - sim.currentTick)
+      const leadMs = leadTicks * MS_PER_TICK
+      confirmedAtRef.current = nowMs - leadMs
+    }
+
+    latestRef.current = sim
+    setConfirmed(sim)
+  }, [])
+
+  // Derive the board PDA and load/subscribe when the wallet changes.
+  useEffect(() => {
+    setConfirmed(null)
+    pushPredicted(null)
+    setHasBoard(false)
+    setBoardExists(false)
+    latestRef.current = null
+    confirmedBufRef.current = []
+    playbackTickRef.current = 0
+    ceilingTickRef.current = 0
+    lastFrameRef.current = 0
+    confirmedAtRef.current = 0
+    pendingUpgradesRef.current.clear()
+    if (!publicKey) {
+      setBoardPDA(null)
+      return
+    }
+    const pda = boardPda(publicKey)
+    setBoardPDA(pda)
+
+    let sub: number | null = null
+    let cancelled = false
+
+    program.account.board
+      .fetch(pda)
+      .then((data) => {
+        if (cancelled) return
+        setBoardExists(true)
+        setHasBoard(true)
+        applyConfirmed(fromChain(data))
+      })
+      .catch(async () => {
+        if (cancelled) return
+        setHasBoard(false)
+        // Distinguish "no account at all" from "account exists but our decoder
+        // can't read it" (e.g. an older on-chain layout). In the latter case we
+        // can still Reset it (realloc migrates it to the new layout).
+        try {
+          const info = await connection.getAccountInfo(pda)
+          if (!cancelled) setBoardExists(info != null)
+        } catch {
+          if (!cancelled) setBoardExists(false)
+        }
+      })
+
+    sub = connection.onAccountChange(pda, (account) => {
+      const decoded = program.coder.accounts.decode("board", account.data)
+      setHasBoard(true)
+      applyConfirmed(fromChain(decoded))
+    })
+
+    return () => {
+      cancelled = true
+      if (sub !== null) connection.removeAccountChangeListener(sub)
+    }
+  }, [publicKey, connection, applyConfirmed])
+
+  // Render loop: advance the free-running playback clock at real time, then
+  // deterministically simulate from the newest confirmed board at or before
+  // playback up to floor(playback).
+  //
+  // Playback is allowed to LEAD the confirmed chain tick so that build bars,
+  // enemy movement and waves animate live the moment you act - without waiting
+  // for the next advance_game. The lead is bounded by the SAME budget the
+  // program enforces on-chain: `elapsed_seconds * 10` ticks since the last
+  // confirm (MS_PER_TICK = 100 => 10 ticks/s), capped at one slice. We floor
+  // the seconds so we never predict a tick the chain would refuse - guaranteeing
+  // that when we finally flush, the chain reproduces exactly what we showed (no
+  // snap-back). Re-anchoring on real confirmed boards keeps it exact.
+  useEffect(() => {
+    let raf: number
+    const frame = (now: number) => {
+      const buf = confirmedBufRef.current
+      if (buf.length > 0) {
+        // Game over: the chain rejects any further advance once lives hit 0, so
+        // the confirmed state is frozen. Freeze the client too - snap playback
+        // to the confirmed game-over board and stop predicting ahead (otherwise
+        // the local sim would keep marching enemies/waves past the real end).
+        const latest = latestRef.current
+        if (latest && latest.lives <= 0) {
+          playbackTickRef.current = latest.currentTick
+          lastFrameRef.current = now
+          pushPredicted(latest)
+          raf = requestAnimationFrame(frame)
+          return
+        }
+
+        const last = lastFrameRef.current
+        lastFrameRef.current = now
+        const dtMs = last === 0 ? 0 : now - last
+
+        // Real-time lead ceiling: how far past the confirmed tick we may show.
+        const confirmedTick = ceilingTickRef.current
+        const elapsedSec = Math.floor(
+          (now - confirmedAtRef.current) / 1000
+        )
+        const budgetTicks = Math.max(0, elapsedSec) * (1000 / MS_PER_TICK)
+        const leadCeiling =
+          confirmedTick + Math.min(MAX_TICKS_PER_SLICE, budgetTicks)
+
+        // Advance playback at real time, but never past the lead ceiling.
+        let pt = playbackTickRef.current + dtMs / MS_PER_TICK
+        if (pt > leadCeiling) pt = leadCeiling
+        // Guard against float drift below the anchor.
+        if (pt < buf[0].currentTick) pt = buf[0].currentTick
+        playbackTickRef.current = pt
+
+        const playTick = Math.floor(pt)
+
+        // Pick the newest confirmed board whose tick <= playTick as the anchor.
+        let anchor = buf[0]
+        for (let i = 0; i < buf.length; i++) {
+          if (buf[i].currentTick <= playTick) anchor = buf[i]
+          else break
+        }
+
+        // Apply the optimistic upgrade overlay onto whatever board we're about
+        // to render: show the cyan upgrade bar the instant you click.
+        const upgrades = pendingUpgradesRef.current
+        const applyOverlays = (b: SimBoard) => {
+          if (upgrades.size > 0) {
+            upgrades.forEach((idx) => {
+              const t = b.towers[idx]
+              // Only overlay while the chain hasn't reflected the upgrade yet
+              // (pendingLevel still 0). Once the confirmed board carries the real
+              // pending upgrade, the predicted board derives it and we defer to
+              // that (its real readyAtTick drives the filling bar).
+              if (t && t.kind !== 0 && t.pendingLevel === 0) {
+                // Show the pending upgrade (so the cyan bar APPEARS immediately)
+                // but pin it at 0% by keeping readyAtTick a full build-time
+                // ahead of the current tick every frame. The bar only starts
+                // FILLING once the program responds with the real start tick
+                // (carried on the confirmed board), which anchors readyAtTick.
+                t.pendingLevel = t.level + 1
+                t.pendingDamage = t.damage + TOWER_UPGRADE_DAMAGE_BONUS
+                t.pendingRangeSubtiles =
+                  t.rangeSubtiles + TOWER_UPGRADE_RANGE_BONUS
+                t.readyAtTick = b.currentTick + TOWER_UPGRADE_BUILD_TICKS
+              }
+            })
+          }
+        }
+
+        const hasOverlay = upgrades.size > 0
+        if (playTick <= anchor.currentTick) {
+          if (hasOverlay) {
+            const adj = cloneBoard(anchor)
+            applyOverlays(adj)
+            pushPredicted(adj)
+          } else {
+            pushPredicted(anchor)
+          }
+        } else {
+          const sim = cloneBoard(anchor)
+          applyTicks(sim, playTick - anchor.currentTick)
+          applyOverlays(sim)
+          pushPredicted(sim)
+          // If the prediction reaches game over, stop the playback clock here so
+          // enemies/waves don't keep marching past the (predicted) end while we
+          // wait for the chain to confirm it.
+          if (sim.lives <= 0) {
+            playbackTickRef.current = sim.currentTick
+          }
+        }
+      }
+      raf = requestAnimationFrame(frame)
+    }
+    raf = requestAnimationFrame(frame)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const refresh = useCallback(async () => {
+    if (!boardPDA) return
+    try {
+      const data = await program.account.board.fetch(boardPDA)
+      setHasBoard(true)
+      applyConfirmed(fromChain(data))
+    } catch {
+      setHasBoard(false)
+    }
+  }, [boardPDA, applyConfirmed])
+
+  // Send a transaction with the main wallet. On any failure we dig out the full
+  // on-chain program logs (from the SendTransactionError or the confirmation
+  // result) so the real Anchor error is visible in the console instead of an
+  // opaque "unknown action"/"failed to send" message.
+  const sendMain = useCallback(
+    async (tx: any) => {
+      try {
+        // Simulate ourselves FIRST. The wallet adapter's sendTransaction wraps
+        // any RPC failure in an opaque "WalletSendTransactionError: Unexpected
+        // error" that hides the program logs, so we run the simulation directly
+        // against the RPC to capture the real Anchor error + logs.
+        if (publicKey) {
+          tx.feePayer = tx.feePayer ?? publicKey
+          if (
+            !tx.recentBlockhash ||
+            tx.recentBlockhash === "11111111111111111111111111111111"
+          ) {
+            tx.recentBlockhash = (
+              await connection.getLatestBlockhash("confirmed")
+            ).blockhash
+          }
+          const sim = await connection.simulateTransaction(tx)
+          if (sim.value.err) {
+            const logs = sim.value.logs ?? []
+            console.error(
+              "Transaction simulation failed:",
+              JSON.stringify(sim.value.err),
+              "\nProgram logs:\n" + logs.join("\n")
+            )
+            throw new Error(
+              `Simulation failed: ${JSON.stringify(
+                sim.value.err
+              )}\n${logs.join("\n")}`
+            )
+          }
+        }
+
+        const sig = await sendTransaction(tx, connection)
+        const conf = await connection.confirmTransaction(sig, "confirmed")
+        if (conf.value.err) {
+          // Landed but failed: fetch the confirmed tx to read its logs.
+          const detail = await connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          })
+          const logs = detail?.meta?.logMessages ?? []
+          console.error(
+            "Transaction failed on-chain:",
+            JSON.stringify(conf.value.err),
+            "\nProgram logs:\n" + logs.join("\n")
+          )
+          throw new Error(
+            `Transaction failed: ${JSON.stringify(conf.value.err)}\n${logs.join(
+              "\n"
+            )}`
+          )
+        }
+        return sig
+      } catch (e: any) {
+        if (e instanceof SendTransactionError) {
+          // getLogs() pulls the simulation logs from the RPC for this failure.
+          let logs: string[] | null = null
+          try {
+            logs = await e.getLogs(connection)
+          } catch {
+            logs = e.logs ?? null
+          }
+          console.error(
+            "Transaction simulation failed:",
+            e.message,
+            "\nProgram logs:\n" + (logs ? logs.join("\n") : "(no logs)")
+          )
+          throw new Error(
+            `${e.message}\n${logs ? logs.join("\n") : "(no logs)"}`
+          )
+        }
+        console.error("Transaction send failed:", e?.message ?? e)
+        throw e
+      }
+    },
+    [sendTransaction, connection, publicKey]
+  )
+
+  const initBoard = useCallback(async () => {
+    if (!publicKey || !boardPDA) return
+    setBusy(true)
+    try {
+      const tx = await program.methods
+        .initBoard()
+        .accountsPartial({
+          board: boardPDA,
+          signer: publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .transaction()
+      await sendMain(tx)
+      await refresh()
+    } catch (e) {
+      reportError("Create board failed", e)
+    } finally {
+      setBusy(false)
+    }
+  }, [publicKey, boardPDA, sendMain, refresh, reportError])
+
+  const resetBoard = useCallback(async () => {
+    if (!publicKey || !boardPDA) return
+    setBusy(true)
+    setAutoAdvance(false)
+    // Arm the reset guard so any lagging pre-reset account update (old tick/units)
+    // is ignored until we see the fresh tick-0 board.
+    awaitingResetRef.current = true
+    // Drop any optimistic overlays - the board is about to be wiped.
+    pendingUpgradesRef.current.clear()
+    try {
+      const tx = await program.methods
+        .resetBoard()
+        .accountsPartial({
+          board: boardPDA,
+          signer: publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .transaction()
+      await sendMain(tx)
+      await refresh()
+    } catch (e) {
+      // Reset never landed: disarm the guard so we don't ignore real updates.
+      awaitingResetRef.current = false
+      reportError("Reset game failed", e)
+    } finally {
+      setBusy(false)
+    }
+  }, [publicKey, boardPDA, sendMain, refresh, reportError])
+
+  // Build the compute-budget + advance_game instructions used to SETTLE the
+  // chain up to the client's playback tick before a spend. The client predicts
+  // ahead of confirmation (kills -> gold), but the program only knows gold from
+  // ticks it has actually simulated. So a build/upgrade bundles an advance_game
+  // FIRST (same tx) to confirm those pending kills, then spends against the
+  // now-correct gold. Returns [] when there's nothing to settle (predicted is
+  // not ahead of confirmed) so we don't waste CU. `settleSigner` is whoever
+  // signs the tx (session key or main wallet).
+  const buildSettleIxs = useCallback(
+    async (settleSigner: PublicKey, sessionToken: PublicKey | null) => {
+      const conf = latestRef.current
+      const play = Math.floor(playbackTickRef.current)
+      if (!conf || play <= conf.currentTick) return []
+      // Request enough ticks to reach the current playback tick PLUS a small
+      // look-ahead buffer. Without the buffer the settle confirms at exactly the
+      // tick we were on when clicking, but the network round-trip lets local
+      // playback move on, so the confirmed board arrives BEHIND playback and the
+      // render loop would clamp backwards (a tiny "stuck" hitch). The buffer
+      // makes the confirmed tick land at ~where playback will be by the time the
+      // tx confirms, so it's a clean forward step. The program still caps actual
+      // applied ticks by its own real-time budget, so this can't fast-forward
+      // past real time. Capped at MAX slice.
+      const needed = Math.min(
+        play - conf.currentTick + SETTLE_LOOKAHEAD_TICKS,
+        MAX_TICKS_PER_SLICE
+      )
+      const counter = advanceCounterRef.current++ % 65535
+      const computeIx = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 1_400_000,
+      })
+      const advanceIx = await program.methods
+        .advanceGame(needed, counter)
+        .accountsPartial({
+          sessionToken,
+          board: boardPDA!,
+          authority: publicKey!,
+          signer: settleSigner,
+        })
+        .instruction()
+      return [computeIx, advanceIx]
+    },
+    [boardPDA, publicKey]
+  )
+
+  const placeTower = useCallback(
+    async (x: number, y: number) => {
+      if (!publicKey || !boardPDA) return
+      // Guards mirror the program but against the PREDICTED board, since the
+      // bundled advance_game will settle the chain up to that state first, so
+      // the predicted gold is what the build will actually be able to spend.
+      const board = predictedRef.current ?? confirmedRef.current
+      if (board) {
+        if (board.towerCount >= MAX_TOWERS) {
+          notify("Tower limit reached — you can't build any more towers.")
+          return
+        }
+        if (board.gold < TOWER_BASIC_COST) {
+          notify(
+            `Not enough gold to build (need ${TOWER_BASIC_COST}, have ${board.gold}). Kill enemies to earn more.`
+          )
+          return
+        }
+      }
+      setBusy(true)
+      try {
+        const hasSession =
+          sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
+        if (hasSession) {
+          // Session path: the ephemeral key signs for the board authority, so
+          // no wallet popup.
+          const settleIxs = await buildSettleIxs(
+            sessionWallet.publicKey!,
+            sessionWallet.sessionToken as unknown as PublicKey
+          )
+          const tx = await program.methods
+            .placeTower(x, y)
+            .accountsPartial({
+              sessionToken: sessionWallet.sessionToken,
+              board: boardPDA,
+              authority: publicKey,
+              signer: sessionWallet.publicKey!,
+            })
+            .preInstructions(settleIxs)
+            .transaction()
+          await sessionWallet.signAndSendTransaction!(tx)
+        } else {
+          const settleIxs = await buildSettleIxs(publicKey, null)
+          const tx = await program.methods
+            .placeTower(x, y)
+            .accountsPartial({
+              sessionToken: null,
+              board: boardPDA,
+              authority: publicKey,
+              signer: publicKey,
+            })
+            .preInstructions(settleIxs)
+            .transaction()
+          await sendMain(tx)
+        }
+        await refresh()
+      } catch (e) {
+        reportError("Place tower failed", e)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [
+      publicKey,
+      boardPDA,
+      sessionWallet,
+      sendMain,
+      refresh,
+      reportError,
+      notify,
+      confirmedRef,
+      buildSettleIxs,
+    ]
+  )
+
+  const upgradeTower = useCallback(
+    async (towerIndex: number) => {
+      if (!publicKey || !boardPDA) return
+      // Guards mirror the program but against the PREDICTED board (see
+      // placeTower) since the bundled advance_game settles the chain first.
+      const board = predictedRef.current ?? confirmedRef.current
+      if (board) {
+        const tower = board.towers[towerIndex]
+        // Still finishing its INITIAL build (not yet armed) - can't upgrade a
+        // tower that isn't even active. pendingLevel === 0 distinguishes this
+        // from an in-progress upgrade (handled below).
+        if (
+          tower &&
+          tower.pendingLevel === 0 &&
+          board.currentTick < tower.readyAtTick
+        ) {
+          notify("This tower is still building — wait until it's active.")
+          return
+        }
+        if (tower && tower.pendingLevel !== 0) {
+          notify("This tower is already being upgraded.")
+          return
+        }
+        if (tower && tower.level >= TOWER_MAX_LEVEL) {
+          notify(`This tower is already at max level (${TOWER_MAX_LEVEL}).`)
+          return
+        }
+        if (board.gold < TOWER_UPGRADE_COST) {
+          notify(
+            `Not enough gold to upgrade (need ${TOWER_UPGRADE_COST}, have ${board.gold}). Kill enemies to earn more.`
+          )
+          return
+        }
+      }
+      // Mark this tower as having an in-flight upgrade so the cyan bar APPEARS
+      // immediately (pinned at 0%). It only starts FILLING once the program
+      // responds with the real start tick. Cleared in `finally`.
+      pendingUpgradesRef.current.add(towerIndex)
+      setBusy(true)
+      try {
+        const hasSession =
+          sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
+        if (hasSession) {
+          const settleIxs = await buildSettleIxs(
+            sessionWallet.publicKey!,
+            sessionWallet.sessionToken as unknown as PublicKey
+          )
+          const tx = await program.methods
+            .upgradeTower(towerIndex)
+            .accountsPartial({
+              sessionToken: sessionWallet.sessionToken,
+              board: boardPDA,
+              authority: publicKey,
+              signer: sessionWallet.publicKey!,
+            })
+            .preInstructions(settleIxs)
+            .transaction()
+          await sessionWallet.signAndSendTransaction!(tx)
+        } else {
+          const settleIxs = await buildSettleIxs(publicKey, null)
+          const tx = await program.methods
+            .upgradeTower(towerIndex)
+            .accountsPartial({
+              sessionToken: null,
+              board: boardPDA,
+              authority: publicKey,
+              signer: publicKey,
+            })
+            .preInstructions(settleIxs)
+            .transaction()
+          await sendMain(tx)
+        }
+        await refresh()
+      } catch (e) {
+        reportError("Upgrade tower failed", e)
+      } finally {
+        // Drop the optimistic overlay: on success refresh() has applied the
+        // confirmed board (which carries the real pending upgrade, so the
+        // predicted board derives the bar); on failure it just disappears.
+        pendingUpgradesRef.current.delete(towerIndex)
+        setBusy(false)
+      }
+    },
+    [
+      publicKey,
+      boardPDA,
+      sessionWallet,
+      sendMain,
+      refresh,
+      reportError,
+      notify,
+      confirmedRef,
+      buildSettleIxs,
+    ]
+  )
+
+  // Advance the sim one slice. Prefers the session key (so it can run in a
+  // background loop without wallet popups); falls back to the main wallet.
+  const advance = useCallback(async () => {
+    if (!publicKey || !boardPDA) return
+    if (advancingRef.current) return
+    // The chain rejects advance_game once lives hit 0 (GameOver). Stop here so
+    // we don't spam failing transactions; also switch off any auto-run loop.
+    if (confirmedRef.current && confirmedRef.current.lives <= 0) {
+      setAutoAdvance(false)
+      return
+    }
+    advancingRef.current = true
+    const counter = advanceCounterRef.current++ % 65535
+    // The tick loop (up to MAX_TICKS_PER_SLICE ticks over towers x units) can
+    // exceed the default 200k CU budget, so request more (max is 1.4M).
+    const computeIx = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    })
+    try {
+      const hasSession =
+        sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
+      if (hasSession) {
+        const tx = await program.methods
+          .advanceGame(MAX_TICKS_PER_SLICE, counter)
+          .accountsPartial({
+            sessionToken: sessionWallet.sessionToken,
+            board: boardPDA,
+            authority: publicKey,
+            signer: sessionWallet.publicKey!,
+          })
+          .preInstructions([computeIx])
+          .transaction()
+        await sessionWallet.signAndSendTransaction!(tx)
+      } else {
+        const tx = await program.methods
+          .advanceGame(MAX_TICKS_PER_SLICE, counter)
+          .accountsPartial({
+            sessionToken: null,
+            board: boardPDA,
+            authority: publicKey,
+            signer: publicKey,
+          })
+          .preInstructions([computeIx])
+          .transaction()
+        const sig = await sendMain(tx)
+        console.log("advance_game tx", sig)
+      }
+      await refresh()
+    } catch (e: any) {
+      // Only surface a toast for a manual advance; the auto-run loop would spam.
+      if (!autoAdvance) {
+        reportError("Advance failed", e)
+      } else {
+        console.warn("advance_game failed:", e?.message ?? e)
+      }
+    } finally {
+      advancingRef.current = false
+    }
+  }, [publicKey, boardPDA, sessionWallet, sendMain, refresh, autoAdvance, reportError])
+
+  // Stop auto-run as soon as the confirmed board is game over.
+  useEffect(() => {
+    if (confirmed && confirmed.lives <= 0 && autoAdvance) {
+      setAutoAdvance(false)
+    }
+  }, [confirmed, autoAdvance])
+
+  // Auto-advance loop: while enabled and a session exists, push the sim forward
+  // on an interval so the game runs itself. The on-chain time cap keeps it from
+  // fast-forwarding faster than real time.
+  useEffect(() => {
+    if (!autoAdvance) return
+    const id = setInterval(() => {
+      advance()
+    }, 1000)
+    return () => clearInterval(id)
+  }, [autoAdvance, advance])
+
+  const value = useMemo<TowerDefenseContextValue>(
+    () => ({
+      boardPDA,
+      confirmed,
+      predicted,
+      hasBoard,
+      boardExists,
+      autoAdvance,
+      setAutoAdvance,
+      busy,
+      initBoard,
+      resetBoard,
+      placeTower,
+      upgradeTower,
+      advance,
+      refresh,
+    }),
+    [
+      boardPDA,
+      confirmed,
+      predicted,
+      hasBoard,
+      boardExists,
+      autoAdvance,
+      busy,
+      initBoard,
+      resetBoard,
+      placeTower,
+      upgradeTower,
+      advance,
+      refresh,
+    ]
+  )
+
+  return (
+    <TowerDefenseContext.Provider value={value}>
+      {children}
+    </TowerDefenseContext.Provider>
+  )
+}
+
+export default TowerDefenseProvider

@@ -1,0 +1,59 @@
+apply plugin: 'com.android.library'
+**APPLY_PLUGINS**
+
+dependencies {
+
+    // [Solana.Unity-SDK] Dependencies
+    implementation 'androidx.browser:browser:1.5.0'
+    implementation 'androidx.core:core:1.8.0'
+    implementation 'androidx.versionedparcelable:versionedparcelable:1.1.1'
+    implementation 'com.google.guava:guava:31.1-android'
+    implementation 'com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava'
+    // [Solana.Unity-SDK] End Dependencies
+
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+**DEPS**}
+
+android {
+    namespace "com.unity3d.player"
+    ndkPath "**NDKPATH**"
+    compileSdkVersion **APIVERSION**
+    buildToolsVersion '**BUILDTOOLS**'
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    defaultConfig {
+        minSdkVersion **MINSDKVERSION**
+        targetSdkVersion **TARGETSDKVERSION**
+        ndk {
+            abiFilters **ABIFILTERS**
+        }
+        versionCode **VERSIONCODE**
+        versionName '**VERSIONNAME**'
+        consumerProguardFiles 'proguard-unity.txt'**USER_PROGUARD**
+    }
+
+    lintOptions {
+        abortOnError false
+    }
+
+    aaptOptions {
+        noCompress = **BUILTIN_NOCOMPRESS** + unityStreamingAssets.tokenize(', ')
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }**PACKAGING_OPTIONS**
+}
+**IL_CPP_BUILD_SETUP**
+**SOURCE_BUILD_SETUP**
+**EXTERNAL_SOURCES**
+
+// [Solana.Unity-SDK] Conflict Resolution
+configurations.all {
+    exclude group: 'com.google.guava', module: 'listenablefuture'
+    resolutionStrategy {
+        force 'androidx.core:core:1.8.0'
+    }
+}
+// [Solana.Unity-SDK] End Conflict Resolution
