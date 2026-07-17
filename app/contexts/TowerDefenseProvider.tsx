@@ -371,11 +371,18 @@ export const TowerDefenseProvider = ({
         const dtMs = last === 0 ? 0 : now - last
 
         // Real-time lead ceiling: how far past the confirmed tick we may show.
+        // Budget accrues CONTINUOUSLY in milliseconds (not floored to whole
+        // seconds). The old whole-second floor caused a ~1s freeze on re-anchor:
+        // after a settle confirmed a tick just BEHIND playback, back-dating the
+        // budget window left <1s of lead, which floored to 0 budget ticks, so the
+        // ceiling dropped below playback and clamped it until a full second
+        // accrued. Continuous ms keeps the ceiling smooth. We still floor the
+        // rendered tick (Math.floor(pt) below), and the settle's look-ahead
+        // reconciles with the chain's own whole-second budget, so we never render
+        // a tick the chain will refuse.
         const confirmedTick = ceilingTickRef.current
-        const elapsedSec = Math.floor(
-          (now - confirmedAtRef.current) / 1000
-        )
-        const budgetTicks = Math.max(0, elapsedSec) * (1000 / MS_PER_TICK)
+        const elapsedMs = Math.max(0, now - confirmedAtRef.current)
+        const budgetTicks = elapsedMs / MS_PER_TICK
         const leadCeiling =
           confirmedTick + Math.min(MAX_TICKS_PER_SLICE, budgetTicks)
 
@@ -393,6 +400,21 @@ export const TowerDefenseProvider = ({
         for (let i = 0; i < buf.length; i++) {
           if (buf[i].currentTick <= playTick) anchor = buf[i]
           else break
+        }
+
+        // Garbage-collect optimistic upgrade overlays that the CONFIRMED board
+        // now reflects (the real pending upgrade landed) or that no longer point
+        // at a valid tower. Doing this against confirmed truth (not on tx return)
+        // means the overlay lives exactly until the real bar can take over, with
+        // no gap where neither is shown.
+        const confTruth = latestRef.current
+        if (pendingUpgradesRef.current.size > 0 && confTruth) {
+          pendingUpgradesRef.current.forEach((idx) => {
+            const ct = confTruth.towers[idx]
+            if (!ct || ct.kind === 0 || ct.pendingLevel !== 0) {
+              pendingUpgradesRef.current.delete(idx)
+            }
+          })
         }
 
         // Apply the optimistic upgrade overlay onto whatever board we're about
@@ -818,13 +840,19 @@ export const TowerDefenseProvider = ({
           await sendMain(tx)
         }
         await refresh()
+        // NOTE: do NOT clear the overlay here. The confirmed board's upgrade
+        // tick can be AHEAD of current playback (the settle looks ahead), so the
+        // render anchor may still be a pre-upgrade board for a moment. If we drop
+        // the overlay now the cyan bar vanishes until playback catches up. The
+        // overlay is a no-op once a board actually carries the pending upgrade
+        // (its guard checks pendingLevel === 0), and the render loop garbage-
+        // collects the entry once the CONFIRMED tower shows the upgrade - so the
+        // bar hands off seamlessly from optimistic to real.
       } catch (e) {
         reportError("Upgrade tower failed", e)
-      } finally {
-        // Drop the optimistic overlay: on success refresh() has applied the
-        // confirmed board (which carries the real pending upgrade, so the
-        // predicted board derives the bar); on failure it just disappears.
+        // Failed: nothing landed on-chain, so remove the optimistic bar now.
         pendingUpgradesRef.current.delete(towerIndex)
+      } finally {
         setBusy(false)
       }
     },
