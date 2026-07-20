@@ -894,6 +894,13 @@ export const TowerDefenseProvider = ({
         await persistSession(publicKey, session).catch((e) =>
           console.warn("persistSession failed:", e?.message ?? e)
         )
+        // The SDK only reads IndexedDB on mount / wallet change, so it won't see
+        // the session we just wrote. Calling getSessionToken() re-reads it into
+        // the hook's in-memory refs and rerenders, so sessionToken/publicKey go
+        // live immediately (HUD auto-run enables, no reload needed).
+        await sessionWallet?.getSessionToken?.().catch((e: any) =>
+          console.warn("getSessionToken refresh failed:", e?.message ?? e)
+        )
       }
       await refresh()
     } catch (e) {
@@ -909,6 +916,7 @@ export const TowerDefenseProvider = ({
     reportError,
     ensureHighscore,
     prepareSessionIfNeeded,
+    sessionWallet,
   ])
 
   const resetBoard = useCallback(async () => {
@@ -945,6 +953,11 @@ export const TowerDefenseProvider = ({
         await persistSession(publicKey, session).catch((e) =>
           console.warn("persistSession failed:", e?.message ?? e)
         )
+        // Re-read the just-persisted session into the SDK's in-memory state so
+        // sessionToken/publicKey update immediately (see initBoard for detail).
+        await sessionWallet?.getSessionToken?.().catch((e: any) =>
+          console.warn("getSessionToken refresh failed:", e?.message ?? e)
+        )
       }
       // Fetch the freshly-reset account directly and snap the whole local model
       // to it. We DON'T rely solely on the subscription/refresh + tick-compare:
@@ -978,6 +991,7 @@ export const TowerDefenseProvider = ({
     reportError,
     ensureHighscore,
     prepareSessionIfNeeded,
+    sessionWallet,
   ])
 
   // Build the compute-budget + advance_game instructions used to SETTLE the
