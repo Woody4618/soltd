@@ -24,7 +24,7 @@ importers:
         specifier: ^11.11.0
         version: 11.14.1(@emotion/react@11.14.0(@types/react@18.2.7)(react@18.2.0))(@types/react@18.2.7)(react@18.2.0)
       '@magicblock-labs/gum-react-sdk':
-        specifier: ^3.0.4
+        specifier: ^3.0.10
         version: 3.0.10(bs58@6.0.0)(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(react-native@0.86.0(@babel/core@7.29.7)(@types/react@18.2.7)(bufferutil@4.1.0)(react@18.2.0)(utf-8-validate@6.0.6))(react@18.2.0)(typescript@5.0.4)(utf-8-validate@6.0.6)
       '@magicblock-labs/gum-sdk':
         specifier: ^3.0.5

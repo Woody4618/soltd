@@ -2,6 +2,7 @@
   "name": "wallet-adapter-chakraui-nextjs",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.4.1",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,7 +15,7 @@
     "@chakra-ui/react": "^2.6.1",
     "@emotion/react": "^11.11.0",
     "@emotion/styled": "^11.11.0",
-    "@magicblock-labs/gum-react-sdk": "^3.0.4",
+    "@magicblock-labs/gum-react-sdk": "^3.0.10",
     "@magicblock-labs/gum-sdk": "^3.0.5",
     "@solana/wallet-adapter-base": "^0.9.22",
     "@solana/wallet-adapter-react": "^0.15.32",
