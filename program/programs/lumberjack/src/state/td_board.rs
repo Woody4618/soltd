@@ -97,7 +97,12 @@ pub struct Board {
     pub grid_size: u8,
     pub path_len: u8,
     pub tower_count: u8,
-    pub _pad0: [u8; 3],
+    // 1 once this game's final score has been recorded into the highscore list
+    // (set the tick lives hit 0). Guards against double-inserting across the
+    // slice boundary. Occupies one byte of what used to be pure padding, so the
+    // account layout/size is unchanged and existing boards stay valid.
+    pub scored: u8,
+    pub _pad0: [u8; 2],
     pub lives: u32,           // leaks remaining before game over
     pub gold: u32,            // currency for placing/upgrading towers
     pub kills: u32,           // units killed

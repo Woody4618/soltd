@@ -19,6 +19,43 @@ pub const MAX_PATH_LEN: usize = 64;
 pub const STARTING_LIVES: u32 = 8;
 pub const STARTING_GOLD: u32 = 200;
 
+// ---------------------------------------------------------------------------
+// Highscore + jackpot economics
+// ---------------------------------------------------------------------------
+// Every time a player starts (init_board) or resets (reset_board) a game they
+// pay a fixed entry. Most of it feeds the jackpot pool; a small rake goes to
+// the project fee wallet (similar to solana-2048's price pool + fee split).
+// 5% fee.
+pub const ENTRY_FEE_LAMPORTS: u64 = 100_000_000; // 0.1 SOL total
+pub const ENTRY_FEE_TO_POOL_LAMPORTS: u64 = 95_000_000; // 0.095 SOL -> jackpot
+pub const ENTRY_FEE_TO_OWNER_LAMPORTS: u64 = 5_000_000; // 0.005 SOL -> fee wallet (5%)
+
+// Fixed fee wallet that receives the rake. (Base58 pubkey supplied by owner.)
+#[allow(dead_code)]
+pub const FEE_WALLET: &str = "GsfNSuZFrT2r4xzSndnCSs9tTXwt47etPqU8yFVnDcXd";
+
+// Highscore is the number of kills in a single game. The board list keeps the
+// top-N wallets (best-per-wallet), which bounds the account size.
+pub const MAX_HIGHSCORE_ENTRIES: usize = 10;
+
+// Payout goes to the top 3 finishers, split 60/30/10 (percent of the spendable
+// pool). If fewer than 3 players are on the board, the unfilled shares stay in
+// the pool for the next period.
+pub const PAYOUT_WINNERS: usize = 3;
+pub const PAYOUT_SHARES_PERCENT: [u64; PAYOUT_WINNERS] = [60, 30, 10];
+
+// The highscore can be reset (and the jackpot paid out) at most once per
+// cooldown window by anyone. "Once a day" for now.
+pub const HIGHSCORE_RESET_COOLDOWN_SECONDS: i64 = 86_400; // 24h
+
+// PDA seeds (named so client + program can't drift).
+// NOTE: the jackpot pool is a PROGRAM-OWNED data account (Account<Pricepool>),
+// like solana-2048's `price_pool`, so the program can direct-debit lamports out
+// on payout. The seed changed from the old "pool" (which was a System-owned
+// SystemAccount and couldn't be debited) to "price_pool" for a fresh account.
+pub const POOL_SEED: &[u8] = b"price_pool";
+pub const HIGHSCORE_SEED: &[u8] = b"highscore";
+
 // Deterministic clock. The board advances by discrete ticks. Wall-clock time is
 // only ever used to bound how many ticks a single `advance_game` slice may
 // apply, never as the game clock itself.

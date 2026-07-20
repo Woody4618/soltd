@@ -14,6 +14,7 @@ import {
   VStack,
 } from "@chakra-ui/react"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
+import { ENTRY_FEE_SOL } from "@/utils/anchor"
 
 // A summary stat row inside the modal (icon + label + value).
 const SummaryRow = ({
@@ -155,7 +156,7 @@ const TowerDefenseGameOverModal = () => {
             loadingText="Starting…"
             onClick={() => resetBoard()}
           >
-            Start New Game
+            Start New Game ({ENTRY_FEE_SOL} SOL)
           </Button>
         </ModalFooter>
       </ModalContent>

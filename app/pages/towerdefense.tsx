@@ -15,6 +15,8 @@ import SessionKeyButton from "@/components/SessionKeyButton"
 import TowerDefenseBoard, { BOARD_SIZE } from "@/components/TowerDefenseBoard"
 import TowerDefenseHud from "@/components/TowerDefenseHud"
 import TowerDefensePanel from "@/components/TowerDefensePanel"
+import TowerDefenseHowToPlay from "@/components/TowerDefenseHowToPlay"
+import TowerDefenseLeaderboard from "@/components/TowerDefenseLeaderboard"
 import TowerDefenseGameOverModal from "@/components/TowerDefenseGameOverModal"
 
 export default function TowerDefensePage() {
@@ -56,13 +58,17 @@ export default function TowerDefensePage() {
             wrap="wrap"
             px={4}
           >
-            {/* Left column: game stats directly above the board. */}
+            {/* Left column: stats above the board; how-to below it. */}
             <VStack spacing={3} align="stretch" w={`${BOARD_SIZE}px`}>
               <TowerDefenseHud />
               <TowerDefenseBoard />
+              <TowerDefenseHowToPlay />
             </VStack>
-            {/* Right column: build reference, controls, reset, how-to. */}
-            <TowerDefensePanel />
+            {/* Right column: daily highscore + jackpot, then game controls. */}
+            <VStack spacing={4} align="stretch">
+              <TowerDefenseLeaderboard />
+              <TowerDefensePanel />
+            </VStack>
           </Flex>
         )}
       </VStack>

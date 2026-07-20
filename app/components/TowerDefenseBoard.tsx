@@ -844,6 +844,13 @@ const TowerDefenseBoard = () => {
         console.warn("upgradeTower failed:", err?.message ?? err)
       )
     } else {
+      // Path tiles are not buildable - the program rejects them. Block it here
+      // (with feedback) instead of opening the ring and sending a doomed tx.
+      const board = guardBoard ?? predicted
+      if (board && pathTiles(board).has(`${x},${y}`)) {
+        blipAt(x, y, "Can't build on the path", BLIP_SPEND_COLOR)
+        return
+      }
       // Empty tile: open the build ring centred on the tile (CSS px = tile math
       // since the canvas renders 1:1 at SIZE).
       setRing({
@@ -862,6 +869,12 @@ const TowerDefenseBoard = () => {
     setRing(null)
     if (busy) return
     const guardBoard = predicted ?? confirmed
+    // Defense in depth: never send a placement onto a path tile (program rejects
+    // it). The ring shouldn't open on the path, but guard here regardless.
+    if (guardBoard && pathTiles(guardBoard).has(`${x},${y}`)) {
+      blipAt(x, y, "Can't build on the path", BLIP_SPEND_COLOR)
+      return
+    }
     const availableGold = guardBoard?.gold ?? 0
     const buildCost = towerDef(kind)?.cost ?? 0
     blipAt(

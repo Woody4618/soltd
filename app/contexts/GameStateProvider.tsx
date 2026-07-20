@@ -57,8 +57,11 @@ export const GameStateProvider = ({
       .then((data) => {
         setPlayerState(data)
       })
-      .catch((error) => {
-        window.alert("No player data found, please init!")
+      .catch(() => {
+        // No player data yet - this is a normal state (wallet hasn't init'd the
+        // old lumberjack game). Leave state null; the init UI handles it. Do NOT
+        // pop a blocking alert on page load.
+        setPlayerState(null)
       })
 
     connection.onAccountChange(pda, (account) => {
@@ -84,8 +87,10 @@ export const GameStateProvider = ({
         setGameData(data)
         setTotalWoodAvailable(data.totalWoodCollected.toNumber());
       })
-      .catch((error) => {
-        window.alert("No game data found, please init!")
+      .catch(() => {
+        // No global game data yet - normal before it's been initialized. Leave
+        // state null instead of popping a blocking alert on every page load.
+        setGameData(null)
       })
 
     connection.onAccountChange(pda, (account) => {

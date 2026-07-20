@@ -1,5 +1,6 @@
 use crate::constants::*;
 use crate::errors::GameErrorCode;
+use crate::state::highscore::Highscore;
 use crate::state::td_board::*;
 use anchor_lang::prelude::*;
 use session_keys::{Session, SessionToken};
@@ -16,53 +17,81 @@ use session_keys::{Session, SessionToken};
 /// `counter` only exists to make rapid same-block slices produce distinct
 /// transaction signatures (mirrors `chop_tree`).
 pub fn advance_game(ctx: Context<AdvanceGame>, requested_ticks: u16, _counter: u16) -> Result<()> {
-    let board = &mut ctx.accounts.board.load_mut()?;
+    // Record whether we need to submit this game's score to the highscore. The
+    // board borrow is scoped so it's released before we touch the highscore
+    // account below (they're distinct accounts, but keeping the borrow tight
+    // avoids any aliasing surprises).
+    let mut finished_score: Option<(Pubkey, u32)> = None;
 
-    require!(board.lives > 0, GameErrorCode::GameOver);
+    {
+        let board = &mut ctx.accounts.board.load_mut()?;
 
-    let now = Clock::get()?.unix_timestamp;
-    let elapsed = now.saturating_sub(board.last_tick_timestamp).max(0) as u64;
-    let time_budget = elapsed
-        .saturating_mul(1000)
-        .checked_div(MS_PER_TICK as u64)
-        .unwrap_or(0);
+        require!(board.lives > 0, GameErrorCode::GameOver);
 
-    let allowed = (requested_ticks as u64)
-        .min(MAX_TICKS_PER_SLICE)
-        .min(time_budget);
+        let now = Clock::get()?.unix_timestamp;
+        let elapsed = now.saturating_sub(board.last_tick_timestamp).max(0) as u64;
+        let time_budget = elapsed
+            .saturating_mul(1000)
+            .checked_div(MS_PER_TICK as u64)
+            .unwrap_or(0);
 
-    if allowed > 0 {
-        // `apply_ticks` may apply FEWER than `allowed` ticks if it runs low on
-        // compute budget (dense board). Bookkeeping below uses the number
-        // ACTUALLY applied so the clock never runs ahead of the simulation; the
-        // client detects the shortfall (on-chain current_tick still behind its
-        // target) and simply calls advance_game again to drain the backlog.
-        let applied = board.apply_ticks(allowed);
+        let allowed = (requested_ticks as u64)
+            .min(MAX_TICKS_PER_SLICE)
+            .min(time_budget);
 
-        // Advance the clock only by the real time actually CONSUMED by the ticks
-        // we applied - not all the way to `now`. If the caller requested fewer
-        // ticks than the elapsed budget would allow (e.g. a small "settle"
-        // advance before placing a tower), the leftover budget carries over so
-        // the NEXT advance can proceed immediately instead of waiting for fresh
-        // seconds to accrue. Integer seconds; sub-second remainder is rounded
-        // down and effectively rolls into the next call.
-        let consumed_seconds = applied
-            .saturating_mul(MS_PER_TICK as u64)
-            .checked_div(1000)
-            .unwrap_or(0) as i64;
-        board.last_tick_timestamp = board.last_tick_timestamp.saturating_add(consumed_seconds);
+        if allowed > 0 {
+            // `apply_ticks` may apply FEWER than `allowed` ticks if it runs low
+            // on compute budget (dense board). Bookkeeping below uses the number
+            // ACTUALLY applied so the clock never runs ahead of the simulation;
+            // the client detects the shortfall (on-chain current_tick still
+            // behind its target) and calls advance_game again to drain the rest.
+            let applied = board.apply_ticks(allowed);
 
-        // Anti-cheat: never let the timestamp trail `now` by more than one
-        // slice's worth of real time. Otherwise a player who doesn't advance
-        // for a long time could bank unlimited budget and later fast-forward in
-        // bursts. This caps carry-over to at most one slice.
-        let max_lag_seconds = MAX_TICKS_PER_SLICE
-            .saturating_mul(MS_PER_TICK as u64)
-            .checked_div(1000)
-            .unwrap_or(0) as i64;
-        if now.saturating_sub(board.last_tick_timestamp) > max_lag_seconds {
-            board.last_tick_timestamp = now.saturating_sub(max_lag_seconds);
+            // Advance the clock only by the real time actually CONSUMED by the
+            // ticks we applied - not all the way to `now`. If the caller
+            // requested fewer ticks than the elapsed budget would allow (e.g. a
+            // small "settle" advance before placing a tower), the leftover
+            // budget carries over so the NEXT advance can proceed immediately
+            // instead of waiting for fresh seconds to accrue. Integer seconds;
+            // sub-second remainder is rounded down and rolls into the next call.
+            let consumed_seconds = applied
+                .saturating_mul(MS_PER_TICK as u64)
+                .checked_div(1000)
+                .unwrap_or(0) as i64;
+            board.last_tick_timestamp =
+                board.last_tick_timestamp.saturating_add(consumed_seconds);
+
+            // Anti-cheat: never let the timestamp trail `now` by more than one
+            // slice's worth of real time. Otherwise a player who doesn't advance
+            // for a long time could bank unlimited budget and later fast-forward
+            // in bursts. This caps carry-over to at most one slice.
+            let max_lag_seconds = MAX_TICKS_PER_SLICE
+                .saturating_mul(MS_PER_TICK as u64)
+                .checked_div(1000)
+                .unwrap_or(0) as i64;
+            if now.saturating_sub(board.last_tick_timestamp) > max_lag_seconds {
+                board.last_tick_timestamp = now.saturating_sub(max_lag_seconds);
+            }
+
+            // Game just ended this slice: lives reached 0 and we haven't yet
+            // recorded the final score. Flag it so we insert into the highscore
+            // exactly once (the `scored` byte survives across slices). The score
+            // (kills) is read straight off the board, never client input, so it
+            // can't be forged.
+            if board.lives == 0 && board.scored == 0 {
+                board.scored = 1;
+                finished_score = Some((board.authority, board.kills));
+            }
         }
+    }
+
+    // Highscore insert happens AFTER the board borrow is dropped. Done inline in
+    // the game loop's driving instruction so scoring is automatic and can't be
+    // skipped by never calling a separate submit instruction.
+    if let Some((player, kills)) = finished_score {
+        let hs = &mut ctx.accounts.highscore;
+        hs.insert(player, kills);
+        msg!("Game over: recorded {} kills for {}", kills, player);
     }
 
     Ok(())
@@ -87,6 +116,16 @@ pub struct AdvanceGame<'info> {
         bump,
     )]
     pub board: AccountLoader<'info, Board>,
+
+    /// Global highscore list (singleton PDA). Passed on every advance so the
+    /// game loop can record the final score automatically the tick the game
+    /// ends. Only mutated on that terminal tick; otherwise untouched.
+    #[account(
+        mut,
+        seeds = [HIGHSCORE_SEED],
+        bump,
+    )]
+    pub highscore: Account<'info, Highscore>,
 
     /// CHECK: The board is a PDA of this key, and the session/authority gate in
     /// `lib.rs` verifies it matches the board's stored authority.

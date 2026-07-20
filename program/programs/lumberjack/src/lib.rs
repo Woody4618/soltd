@@ -81,4 +81,28 @@ pub mod lumberjack {
     ) -> Result<()> {
         td_advance_game::advance_game(ctx, requested_ticks, counter)
     }
+
+    // -----------------------------------------------------------------------
+    // Highscore + jackpot
+    // -----------------------------------------------------------------------
+
+    // Bootstrap the singleton highscore account (call once, by anyone).
+    pub fn init_highscore(ctx: Context<InitHighscore>) -> Result<()> {
+        td_init_highscore::init_highscore(ctx)
+    }
+
+    // Bootstrap the program-owned jackpot pool account (call once, by anyone).
+    pub fn init_pool(ctx: Context<InitPool>) -> Result<()> {
+        td_init_pool::init_pool(ctx)
+    }
+
+    // Note: there is no manual submit_score instruction. The final score is
+    // recorded automatically inside `advance_game` on the tick the game ends
+    // (lives -> 0), read straight from the board so it can't be forged.
+
+    // Pay out the jackpot to the current leader and clear the list. Callable by
+    // anyone, at most once per cooldown window.
+    pub fn reset_highscore(ctx: Context<ResetHighscore>) -> Result<()> {
+        td_reset_highscore::reset_highscore(ctx)
+    }
 }

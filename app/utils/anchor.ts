@@ -56,6 +56,9 @@ export const TOTAL_WOOD_AVAILABLE: BN = new BN(100000)
 // The on-chain Board account (zero-copy). Decoded shape from the IDL.
 export type Board = IdlAccounts<Lumberjack>["board"]
 
+// The on-chain Highscore list account.
+export type Highscore = IdlAccounts<Lumberjack>["highscore"]
+
 // Gum session-keys program (must match the on-chain declare_id!).
 export const SESSION_PROGRAM_ID = new PublicKey(
   "KeyspM2ssCJbqUhQ4k7sveSiY4WjnYsrXkC8oDbwde5"
@@ -96,6 +99,36 @@ export function boardPda(authority: PublicKey): PublicKey {
     program.programId
   )[0]
 }
+
+// ---------------------------------------------------------------------------
+// Highscore + jackpot (mirrors constants.rs)
+// ---------------------------------------------------------------------------
+
+// Project fee wallet that receives the entry-fee rake. Must match FEE_WALLET
+// in the program's constants.rs.
+export const FEE_WALLET = new PublicKey(
+  "GsfNSuZFrT2r4xzSndnCSs9tTXwt47etPqU8yFVnDcXd"
+)
+
+// Entry fee charged on every game start/reset (0.1 SOL), split 90% pool / 10%
+// rake by the program. Shown in the UI; the split is enforced on-chain.
+export const ENTRY_FEE_LAMPORTS = 100_000_000
+export const ENTRY_FEE_SOL = 0.1
+export const MAX_HIGHSCORE_ENTRIES = 10
+export const HIGHSCORE_RESET_COOLDOWN_SECONDS = 86_400 // 24h
+
+// Jackpot pool PDA: ["price_pool"] (program-owned Pricepool account that
+// escrows fees; program-owned so payout can debit it, like solana-2048).
+export const [poolPda] = PublicKey.findProgramAddressSync(
+  [Buffer.from("price_pool", "utf8")],
+  program.programId
+)
+
+// Highscore singleton PDA: ["highscore"].
+export const [highscorePda] = PublicKey.findProgramAddressSync(
+  [Buffer.from("highscore", "utf8")],
+  program.programId
+)
 
 // Gum session-token PDA: ["session_token", target_program, session_signer, authority].
 export function sessionTokenPda(

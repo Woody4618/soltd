@@ -19,6 +19,9 @@ import { useToast } from "@chakra-ui/react"
 import {
   program,
   boardPda,
+  poolPda,
+  highscorePda,
+  FEE_WALLET,
   MS_PER_TICK,
   MAX_TICKS_PER_SLICE,
   MAX_TOWERS,
@@ -28,6 +31,7 @@ import {
   TOWER_UPGRADE_BUILD_TICKS,
   TOWER_KIND_BASIC,
   towerDef,
+  Highscore,
 } from "@/utils/anchor"
 import {
   SimBoard,
@@ -69,6 +73,11 @@ interface TowerDefenseContextValue {
   upgradeTower: (towerIndex: number) => Promise<void>
   advance: () => Promise<void>
   refresh: () => Promise<void>
+  // Highscore + jackpot.
+  highscore: Highscore | null
+  jackpotSol: number
+  refreshHighscore: () => Promise<void>
+  payoutHighscore: () => Promise<void>
 }
 
 const TowerDefenseContext = createContext<TowerDefenseContextValue>({
@@ -89,6 +98,10 @@ const TowerDefenseContext = createContext<TowerDefenseContextValue>({
   upgradeTower: async () => {},
   advance: async () => {},
   refresh: async () => {},
+  highscore: null,
+  jackpotSol: 0,
+  refreshHighscore: async () => {},
+  payoutHighscore: async () => {},
 })
 
 export const useTowerDefense = () => useContext(TowerDefenseContext)
@@ -188,6 +201,10 @@ export const TowerDefenseProvider = ({
 
   const [boardPDA, setBoardPDA] = useState<PublicKey | null>(null)
   const [confirmed, setConfirmed] = useState<SimBoard | null>(null)
+  // Global highscore list + jackpot (in SOL). Refreshed on load, after a
+  // game-over submit, and after a payout.
+  const [highscore, setHighscore] = useState<Highscore | null>(null)
+  const [jackpotSol, setJackpotSol] = useState<number>(0)
   const [predicted, setPredicted] = useState<SimBoard | null>(null)
   const [hasBoard, setHasBoard] = useState(false)
   const [boardExists, setBoardExists] = useState(false)
@@ -694,14 +711,106 @@ export const TowerDefenseProvider = ({
     [sendTransaction, connection, publicKey]
   )
 
+  // Fetch the global highscore list + jackpot pool balance for the UI.
+  const refreshHighscore = useCallback(async () => {
+    try {
+      const hs = await program.account.highscore.fetch(highscorePda)
+      setHighscore(hs as Highscore)
+    } catch {
+      setHighscore(null) // not created yet
+    }
+    try {
+      const bal = await connection.getBalance(poolPda)
+      // Show the spendable jackpot (balance minus the tiny rent reserve). The
+      // pool is a zero-data account so its rent reserve is ~0.00089 SOL.
+      const reserve = await connection.getMinimumBalanceForRentExemption(0)
+      setJackpotSol(Math.max(0, (bal - reserve) / 1e9))
+    } catch {
+      // leave previous value
+    }
+  }, [connection])
+
+  // Create the highscore singleton if it doesn't exist yet. It's a one-time
+  // bootstrap; safe to call before every game (a redundant creation just fails
+  // harmlessly and is swallowed).
+  //
+  // The jackpot pool is NOT created here anymore: init_board/reset_board declare
+  // it `init_if_needed`, so the pool PDA is created on demand by the very first
+  // game and simply loaded thereafter.
+  const ensureHighscore = useCallback(async () => {
+    if (!publicKey) return
+    const hsInfo = await connection.getAccountInfo(highscorePda)
+    if (!hsInfo) {
+      try {
+        const tx = await program.methods
+          .initHighscore()
+          .accountsPartial({
+            highscore: highscorePda,
+            signer: publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .transaction()
+        await sendMain(tx)
+      } catch (e) {
+        console.warn("ensureHighscore (highscore):", (e as any)?.message ?? e)
+      }
+    }
+  }, [publicKey, connection, sendMain])
+
+  // Trigger the daily payout: split the jackpot 60/30/10 across the top 3
+  // players and clear the list. Callable by anyone (the program enforces the
+  // 24h cooldown). The winner accounts must match the leaderboard order.
+  const payoutHighscore = useCallback(async () => {
+    if (!publicKey) return
+    const hs = await program.account.highscore.fetch(highscorePda).catch(() => null)
+    if (!hs || hs.count === 0) {
+      notify("The highscore list is empty - nothing to pay out yet.")
+      return
+    }
+    const entries = (hs as Highscore).entries
+    const count = (hs as Highscore).count
+    // Winners are the top-N (max 3), in leaderboard order. Passed as remaining
+    // accounts (writable, non-signer) so the program can verify + pay each.
+    const places = Math.min(count, 3)
+    const winnerMetas = entries.slice(0, places).map((e) => ({
+      pubkey: e.player,
+      isWritable: true,
+      isSigner: false,
+    }))
+    setBusy(true)
+    try {
+      const tx = await program.methods
+        .resetHighscore()
+        .accountsPartial({
+          highscore: highscorePda,
+          pool: poolPda,
+          signer: publicKey,
+        })
+        .remainingAccounts(winnerMetas)
+        .transaction()
+      await sendMain(tx)
+      await refreshHighscore()
+      notify("Jackpot paid out to the top 3 players and the board was reset!")
+    } catch (e) {
+      reportError("Payout failed", e)
+    } finally {
+      setBusy(false)
+    }
+  }, [publicKey, sendMain, refreshHighscore, notify, reportError])
+
   const initBoard = useCallback(async () => {
     if (!publicKey || !boardPDA) return
     setBusy(true)
     try {
+      // Make sure the highscore singleton exists before the first game (it's a
+      // one-time bootstrap; harmless if someone else already created it).
+      await ensureHighscore()
       const tx = await program.methods
         .initBoard()
         .accountsPartial({
           board: boardPDA,
+          pool: poolPda,
+          feeWallet: FEE_WALLET,
           signer: publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -726,10 +835,13 @@ export const TowerDefenseProvider = ({
     pendingUpgradesRef.current.clear()
     pendingPlacementsRef.current = []
     try {
+      await ensureHighscore()
       const tx = await program.methods
         .resetBoard()
         .accountsPartial({
           board: boardPDA,
+          pool: poolPda,
+          feeWallet: FEE_WALLET,
           signer: publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -796,6 +908,7 @@ export const TowerDefenseProvider = ({
         .accountsPartial({
           sessionToken,
           board: boardPDA!,
+          highscore: highscorePda,
           authority: publicKey!,
           signer: settleSigner,
         })
@@ -1073,6 +1186,7 @@ export const TowerDefenseProvider = ({
         .accountsPartial({
           sessionToken: sessionWallet.sessionToken,
           board: boardPDA,
+          highscore: highscorePda,
           authority: publicKey,
           signer: sessionWallet.publicKey!,
         })
@@ -1085,6 +1199,7 @@ export const TowerDefenseProvider = ({
         .accountsPartial({
           sessionToken: null,
           board: boardPDA,
+          highscore: highscorePda,
           authority: publicKey,
           signer: publicKey,
         })
@@ -1198,6 +1313,72 @@ export const TowerDefenseProvider = ({
     advance()
   }, [predicted, confirmed, advance])
 
+  // Load the highscore + jackpot once a wallet is connected (and refresh it
+  // periodically so the leaderboard/jackpot stay live while others play).
+  useEffect(() => {
+    refreshHighscore()
+    const id = setInterval(refreshHighscore, 30_000)
+    return () => clearInterval(id)
+  }, [refreshHighscore])
+
+  // Live jackpot via websocket: subscribe to the pool PDA and update the
+  // displayed jackpot the instant its lamports change (anyone paying an entry
+  // fee, or a payout draining it), instead of waiting for the 30s poll. The
+  // subscription hands us the account's lamports directly, so we derive the
+  // spendable amount (balance minus the zero-data rent reserve) without an
+  // extra RPC round-trip.
+  useEffect(() => {
+    let cancelled = false
+    let sub: number | null = null
+    let reserve = 0
+
+    const applyBalance = (lamports: number) => {
+      setJackpotSol(Math.max(0, (lamports - reserve) / 1e9))
+    }
+
+    connection
+      .getMinimumBalanceForRentExemption(0)
+      .then((r) => {
+        if (cancelled) return
+        reserve = r
+        // Subscribe for live updates. onAccountChange fires on the next block
+        // that touches the account, giving near-instant jackpot updates.
+        sub = connection.onAccountChange(poolPda, (account) => {
+          applyBalance(account.lamports)
+        })
+        // Seed the value immediately from the current on-chain balance so we
+        // don't wait for the first change event.
+        connection
+          .getBalance(poolPda)
+          .then((bal) => {
+            if (!cancelled) applyBalance(bal)
+          })
+          .catch(() => {})
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+      if (sub !== null) connection.removeAccountChangeListener(sub)
+    }
+  }, [connection])
+
+  // The final score is recorded ON-CHAIN automatically inside advance_game the
+  // tick lives hit 0 (no separate submit tx). Once the CONFIRMED board shows
+  // game over we just refresh the leaderboard to reflect the new entry. Guarded
+  // so we only refresh once per game (re-armed when a fresh game starts).
+  const scoredGameOverRef = useRef(false)
+  useEffect(() => {
+    if (!confirmed) return
+    if (confirmed.lives > 0) {
+      scoredGameOverRef.current = false // fresh/ongoing game
+      return
+    }
+    if (scoredGameOverRef.current) return
+    scoredGameOverRef.current = true
+    refreshHighscore()
+  }, [confirmed, refreshHighscore])
+
   // Auto-advance loop: while enabled and a session exists, push the sim forward
   // on an interval so the game runs itself. The on-chain time cap keeps it from
   // fast-forwarding faster than real time.
@@ -1228,6 +1409,10 @@ export const TowerDefenseProvider = ({
       upgradeTower,
       advance,
       refresh,
+      highscore,
+      jackpotSol,
+      refreshHighscore,
+      payoutHighscore,
     }),
     [
       boardPDA,
@@ -1245,6 +1430,10 @@ export const TowerDefenseProvider = ({
       upgradeTower,
       advance,
       refresh,
+      highscore,
+      jackpotSol,
+      refreshHighscore,
+      payoutHighscore,
     ]
   )
 

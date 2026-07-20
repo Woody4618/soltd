@@ -1,5 +1,7 @@
 use crate::constants::*;
 use crate::errors::GameErrorCode;
+use crate::instructions::td_entry_fee::charge_entry_fee;
+use crate::state::highscore::Pricepool;
 use crate::state::td_board::*;
 use anchor_lang::prelude::*;
 
@@ -7,13 +9,25 @@ use anchor_lang::prelude::*;
 /// account. Clears all towers and units, restores lives/gold, and rewinds the
 /// tick counter so the player can start a fresh game. The path is re-seeded to
 /// the same deterministic layout as `init_board`.
+///
+/// Like starting, resetting costs the fixed entry fee (jackpot + rake).
 pub fn reset_board(ctx: Context<ResetBoard>) -> Result<()> {
-    let board = &mut ctx.accounts.board.load_mut()?;
+    {
+        let board = ctx.accounts.board.load()?;
+        require!(
+            board.authority == ctx.accounts.signer.key(),
+            GameErrorCode::WrongAuthority
+        );
+    }
 
-    require!(
-        board.authority == ctx.accounts.signer.key(),
-        GameErrorCode::WrongAuthority
-    );
+    charge_entry_fee(
+        &ctx.accounts.signer,
+        &ctx.accounts.pool,
+        &ctx.accounts.fee_wallet,
+        &ctx.accounts.system_program,
+    )?;
+
+    let board = &mut ctx.accounts.board.load_mut()?;
 
     board.current_tick = 0;
     board.last_tick_timestamp = Clock::get()?.unix_timestamp;
@@ -26,6 +40,8 @@ pub fn reset_board(ctx: Context<ResetBoard>) -> Result<()> {
     board.next_unit_id = 0;
     board.wave_number = 0;
     board.next_wave_tick = WAVE_FIRST_DELAY_TICKS;
+    // Clear the scored flag so the fresh game can record its own final score.
+    board.scored = 0;
 
     // Zero out every tower and unit slot so no stale entities survive the reset.
     let mut ti = 0usize;
@@ -92,6 +108,23 @@ pub struct ResetBoard<'info> {
         realloc::zero = false,
     )]
     pub board: AccountLoader<'info, Board>,
+
+    // Jackpot pool: a program-owned PDA (Account<Pricepool>) that escrows entry
+    // fees. Program-owned so payout can direct-debit it (see reset_highscore).
+    // `init_if_needed` bootstraps the pool on demand so no separate init step is
+    // required; if it already exists this just loads it (owner + seeds enforced).
+    #[account(
+        init_if_needed,
+        payer = signer,
+        space = Pricepool::SIZE,
+        seeds = [POOL_SEED],
+        bump,
+    )]
+    pub pool: Account<'info, Pricepool>,
+
+    /// CHECK: validated in `charge_entry_fee` against the hardcoded FEE_WALLET.
+    #[account(mut)]
+    pub fee_wallet: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub signer: Signer<'info>,

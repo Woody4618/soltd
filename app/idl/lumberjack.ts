@@ -53,6 +53,33 @@ export type Lumberjack = {
           }
         },
         {
+          "name": "highscore",
+          "docs": [
+            "Global highscore list (singleton PDA). Passed on every advance so the",
+            "game loop can record the final score automatically the tick the game",
+            "ends. Only mutated on that terminal tick; otherwise untouched."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "authority",
           "docs": [
             "`lib.rs` verifies it matches the board's stored authority."
@@ -111,7 +138,7 @@ export type Lumberjack = {
               {
                 "kind": "account",
                 "path": "player.authority",
-                "account": "playerData"
+                "account": "PlayerData"
               }
             ]
           }
@@ -123,7 +150,7 @@ export type Lumberjack = {
             "seeds": [
               {
                 "kind": "arg",
-                "path": "levelSeed"
+                "path": "level_seed"
               }
             ]
           }
@@ -185,6 +212,80 @@ export type Lumberjack = {
           }
         },
         {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeWallet",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initHighscore",
+      "discriminator": [
+        220,
+        36,
+        227,
+        31,
+        10,
+        102,
+        88,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "highscore",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "signer",
           "writable": true,
           "signer": true
@@ -239,7 +340,7 @@ export type Lumberjack = {
             "seeds": [
               {
                 "kind": "arg",
-                "path": "levelSeed"
+                "path": "level_seed"
               }
             ]
           }
@@ -260,6 +361,54 @@ export type Lumberjack = {
           "type": "string"
         }
       ]
+    },
+    {
+      "name": "initPool",
+      "discriminator": [
+        116,
+        233,
+        199,
+        204,
+        115,
+        159,
+        171,
+        36
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "placeTower",
@@ -358,6 +507,103 @@ export type Lumberjack = {
               {
                 "kind": "account",
                 "path": "signer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeWallet",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "resetHighscore",
+      "discriminator": [
+        132,
+        89,
+        243,
+        27,
+        30,
+        167,
+        176,
+        18
+      ],
+      "accounts": [
+        {
+          "name": "highscore",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
               }
             ]
           }
@@ -509,6 +755,19 @@ export type Lumberjack = {
       ]
     },
     {
+      "name": "highscore",
+      "discriminator": [
+        129,
+        239,
+        224,
+        86,
+        128,
+        44,
+        234,
+        161
+      ]
+    },
+    {
       "name": "playerData",
       "discriminator": [
         197,
@@ -519,6 +778,19 @@ export type Lumberjack = {
         139,
         147,
         128
+      ]
+    },
+    {
+      "name": "pricepool",
+      "discriminator": [
+        83,
+        113,
+        229,
+        106,
+        61,
+        247,
+        85,
+        111
       ]
     }
   ],
@@ -577,6 +849,41 @@ export type Lumberjack = {
       "code": 6010,
       "name": "towerNotReady",
       "msg": "Tower is still building and not yet active"
+    },
+    {
+      "code": 6011,
+      "name": "gameNotOver",
+      "msg": "The game is not over yet"
+    },
+    {
+      "code": 6012,
+      "name": "resetTooSoon",
+      "msg": "The highscore was reset too recently - try again later"
+    },
+    {
+      "code": 6013,
+      "name": "emptyHighscore",
+      "msg": "The highscore list is empty - nothing to pay out"
+    },
+    {
+      "code": 6014,
+      "name": "wrongFeeWallet",
+      "msg": "Wrong fee wallet"
+    },
+    {
+      "code": 6015,
+      "name": "wrongPool",
+      "msg": "Wrong prize pool account"
+    },
+    {
+      "code": 6016,
+      "name": "wrongWinner",
+      "msg": "The provided winner is not the current highscore leader"
+    },
+    {
+      "code": 6017,
+      "name": "overflow",
+      "msg": "Arithmetic overflow"
     }
   ],
   "types": [
@@ -621,11 +928,15 @@ export type Lumberjack = {
             "type": "u8"
           },
           {
+            "name": "scored",
+            "type": "u8"
+          },
+          {
             "name": "pad0",
             "type": {
               "array": [
                 "u8",
-                3
+                2
               ]
             }
           },
@@ -717,6 +1028,69 @@ export type Lumberjack = {
       }
     },
     {
+      "name": "highscore",
+      "docs": [
+        "Global highscore list (a singleton PDA). Keeps the top-N wallets by score",
+        "for the current period, sorted descending. `last_reset` gates how often the",
+        "list can be reset + the jackpot paid out."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "count",
+            "docs": [
+              "Number of populated entries in `entries` (<= MAX_HIGHSCORE_ENTRIES)."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "lastReset",
+            "docs": [
+              "Unix timestamp of the last reset/payout (0 until first reset)."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "entries",
+            "docs": [
+              "Top scores, descending. Only the first `count` are meaningful."
+            ],
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "highscoreEntry"
+                  }
+                },
+                10
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "highscoreEntry",
+      "docs": [
+        "A single highscore row: the player's main wallet and their best kills in a",
+        "single game during the current period."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "score",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
       "name": "pathPoint",
       "docs": [
         "A single waypoint on the deterministic path, in grid tile coordinates."
@@ -786,6 +1160,20 @@ export type Lumberjack = {
             "type": "u16"
           }
         ]
+      }
+    },
+    {
+      "name": "pricepool",
+      "docs": [
+        "The jackpot pool. A PROGRAM-OWNED, zero-data PDA (seeds `[\"price_pool\"]`)",
+        "that escrows entry fees. Mirrors solana-2048's `Pricepool`. Being owned by",
+        "this program (not the System Program) is what lets `reset_highscore`",
+        "direct-debit lamports out to winners. It carries no fields; the account just",
+        "needs to exist and hold lamports."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": []
       }
     },
     {
@@ -956,7 +1344,7 @@ export type Lumberjack = {
       }
     }
   ]
-};
+}
 
 export const IDL: Lumberjack = {
   "address": "td8VwogVVaauJYMNYWEsagCHiX7P3imLC2kuW23rZkm",
@@ -1002,6 +1390,33 @@ export const IDL: Lumberjack = {
               {
                 "kind": "account",
                 "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "highscore",
+          "docs": [
+            "Global highscore list (singleton PDA). Passed on every advance so the",
+            "game loop can record the final score automatically the tick the game",
+            "ends. Only mutated on that terminal tick; otherwise untouched."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
               }
             ]
           }
@@ -1065,7 +1480,7 @@ export const IDL: Lumberjack = {
               {
                 "kind": "account",
                 "path": "player.authority",
-                "account": "playerData"
+                "account": "PlayerData"
               }
             ]
           }
@@ -1077,7 +1492,7 @@ export const IDL: Lumberjack = {
             "seeds": [
               {
                 "kind": "arg",
-                "path": "levelSeed"
+                "path": "level_seed"
               }
             ]
           }
@@ -1139,6 +1554,80 @@ export const IDL: Lumberjack = {
           }
         },
         {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeWallet",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initHighscore",
+      "discriminator": [
+        220,
+        36,
+        227,
+        31,
+        10,
+        102,
+        88,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "highscore",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "signer",
           "writable": true,
           "signer": true
@@ -1193,7 +1682,7 @@ export const IDL: Lumberjack = {
             "seeds": [
               {
                 "kind": "arg",
-                "path": "levelSeed"
+                "path": "level_seed"
               }
             ]
           }
@@ -1214,6 +1703,54 @@ export const IDL: Lumberjack = {
           "type": "string"
         }
       ]
+    },
+    {
+      "name": "initPool",
+      "discriminator": [
+        116,
+        233,
+        199,
+        204,
+        115,
+        159,
+        171,
+        36
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "placeTower",
@@ -1312,6 +1849,103 @@ export const IDL: Lumberjack = {
               {
                 "kind": "account",
                 "path": "signer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeWallet",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "resetHighscore",
+      "discriminator": [
+        132,
+        89,
+        243,
+        27,
+        30,
+        167,
+        176,
+        18
+      ],
+      "accounts": [
+        {
+          "name": "highscore",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  105,
+                  103,
+                  104,
+                  115,
+                  99,
+                  111,
+                  114,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  99,
+                  101,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
               }
             ]
           }
@@ -1463,6 +2097,19 @@ export const IDL: Lumberjack = {
       ]
     },
     {
+      "name": "highscore",
+      "discriminator": [
+        129,
+        239,
+        224,
+        86,
+        128,
+        44,
+        234,
+        161
+      ]
+    },
+    {
       "name": "playerData",
       "discriminator": [
         197,
@@ -1473,6 +2120,19 @@ export const IDL: Lumberjack = {
         139,
         147,
         128
+      ]
+    },
+    {
+      "name": "pricepool",
+      "discriminator": [
+        83,
+        113,
+        229,
+        106,
+        61,
+        247,
+        85,
+        111
       ]
     }
   ],
@@ -1531,6 +2191,41 @@ export const IDL: Lumberjack = {
       "code": 6010,
       "name": "towerNotReady",
       "msg": "Tower is still building and not yet active"
+    },
+    {
+      "code": 6011,
+      "name": "gameNotOver",
+      "msg": "The game is not over yet"
+    },
+    {
+      "code": 6012,
+      "name": "resetTooSoon",
+      "msg": "The highscore was reset too recently - try again later"
+    },
+    {
+      "code": 6013,
+      "name": "emptyHighscore",
+      "msg": "The highscore list is empty - nothing to pay out"
+    },
+    {
+      "code": 6014,
+      "name": "wrongFeeWallet",
+      "msg": "Wrong fee wallet"
+    },
+    {
+      "code": 6015,
+      "name": "wrongPool",
+      "msg": "Wrong prize pool account"
+    },
+    {
+      "code": 6016,
+      "name": "wrongWinner",
+      "msg": "The provided winner is not the current highscore leader"
+    },
+    {
+      "code": 6017,
+      "name": "overflow",
+      "msg": "Arithmetic overflow"
     }
   ],
   "types": [
@@ -1575,11 +2270,15 @@ export const IDL: Lumberjack = {
             "type": "u8"
           },
           {
+            "name": "scored",
+            "type": "u8"
+          },
+          {
             "name": "pad0",
             "type": {
               "array": [
                 "u8",
-                3
+                2
               ]
             }
           },
@@ -1671,6 +2370,69 @@ export const IDL: Lumberjack = {
       }
     },
     {
+      "name": "highscore",
+      "docs": [
+        "Global highscore list (a singleton PDA). Keeps the top-N wallets by score",
+        "for the current period, sorted descending. `last_reset` gates how often the",
+        "list can be reset + the jackpot paid out."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "count",
+            "docs": [
+              "Number of populated entries in `entries` (<= MAX_HIGHSCORE_ENTRIES)."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "lastReset",
+            "docs": [
+              "Unix timestamp of the last reset/payout (0 until first reset)."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "entries",
+            "docs": [
+              "Top scores, descending. Only the first `count` are meaningful."
+            ],
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "highscoreEntry"
+                  }
+                },
+                10
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "highscoreEntry",
+      "docs": [
+        "A single highscore row: the player's main wallet and their best kills in a",
+        "single game during the current period."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "score",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
       "name": "pathPoint",
       "docs": [
         "A single waypoint on the deterministic path, in grid tile coordinates."
@@ -1740,6 +2502,20 @@ export const IDL: Lumberjack = {
             "type": "u16"
           }
         ]
+      }
+    },
+    {
+      "name": "pricepool",
+      "docs": [
+        "The jackpot pool. A PROGRAM-OWNED, zero-data PDA (seeds `[\"price_pool\"]`)",
+        "that escrows entry fees. Mirrors solana-2048's `Pricepool`. Being owned by",
+        "this program (not the System Program) is what lets `reset_highscore`",
+        "direct-debit lamports out to winners. It carries no fields; the account just",
+        "needs to exist and hold lamports."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": []
       }
     },
     {

@@ -24,4 +24,18 @@ pub enum GameErrorCode {
     GameOver,
     #[msg("Tower is still building and not yet active")]
     TowerNotReady,
+    #[msg("The game is not over yet")]
+    GameNotOver,
+    #[msg("The highscore was reset too recently - try again later")]
+    ResetTooSoon,
+    #[msg("The highscore list is empty - nothing to pay out")]
+    EmptyHighscore,
+    #[msg("Wrong fee wallet")]
+    WrongFeeWallet,
+    #[msg("Wrong prize pool account")]
+    WrongPool,
+    #[msg("The provided winner is not the current highscore leader")]
+    WrongWinner,
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }
