@@ -602,6 +602,7 @@ const TowerDefenseBoard = () => {
     placeTower,
     upgradeTower,
     busy,
+    readOnly,
   } = useTowerDefense()
 
   // Open radial build menu (null = closed).
@@ -773,6 +774,8 @@ const TowerDefenseBoard = () => {
       setRing(null)
       return
     }
+    // Spectating: the board is read-only, so no building/upgrading.
+    if (readOnly) return
     if (busy) return
     if (!predicted || predicted.lives <= 0) return
     const canvas = canvasRef.current

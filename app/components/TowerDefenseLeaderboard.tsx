@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import { Box, Button, Divider, HStack, Text, VStack } from "@chakra-ui/react"
+import { PublicKey } from "@solana/web3.js"
 import { useWallet } from "@solana/wallet-adapter-react"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
 import { HIGHSCORE_RESET_COOLDOWN_SECONDS } from "@/utils/anchor"
@@ -9,7 +10,9 @@ const MEDALS = ["🥇", "🥈", "🥉"]
 
 const TowerDefenseLeaderboard = () => {
   const { publicKey } = useWallet()
-  const { highscore, jackpotSol, payoutHighscore, busy } = useTowerDefense()
+  const { highscore, jackpotSol, payoutHighscore, busy, spectate, spectateKey } =
+    useTowerDefense()
+  const watching = spectateKey?.toBase58() ?? null
 
   // Seconds remaining before a payout is allowed again (0 = ready).
   const cooldownLeft = useMemo(() => {
@@ -79,15 +82,38 @@ const TowerDefenseLeaderboard = () => {
         <VStack spacing={1} align="stretch">
           {entries.map((e, i) => {
             const mine = e.player === me
+            const isWatching = e.player === watching
+            // Own entry is a no-op to click (you stay on your live game);
+            // everyone else's is clickable to spectate their board live.
+            const clickable = !mine
             return (
               <HStack
                 key={e.player + i}
+                as={clickable ? "button" : "div"}
+                onClick={
+                  clickable
+                    ? () => spectate(new PublicKey(e.player))
+                    : undefined
+                }
                 spacing={2}
                 fontSize="xs"
                 px={2}
                 py={1}
                 borderRadius="sm"
-                bg={mine ? "#26304a" : "transparent"}
+                textAlign="left"
+                w="100%"
+                bg={
+                  isWatching ? "#2f3a26" : mine ? "#26304a" : "transparent"
+                }
+                border={`1px solid ${isWatching ? "#4f7a2f" : "transparent"}`}
+                cursor={clickable ? "pointer" : "default"}
+                transition="background 0.12s"
+                _hover={clickable ? { bg: isWatching ? "#37451f" : "#20242f" } : undefined}
+                title={
+                  clickable
+                    ? "Watch this player's game live"
+                    : "This is your game"
+                }
               >
                 <Text w="20px" flexShrink={0}>
                   {MEDALS[i] ?? `${i + 1}.`}
@@ -98,7 +124,7 @@ const TowerDefenseLeaderboard = () => {
                   color={mine ? "#8ab4ff" : "gray.300"}
                 >
                   {short(e.player)}
-                  {mine ? " (you)" : ""}
+                  {mine ? " (you)" : isWatching ? " 👁" : ""}
                 </Text>
                 <Text fontWeight="bold" color="#ff8787">
                   {e.score}

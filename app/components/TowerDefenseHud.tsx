@@ -55,6 +55,7 @@ const TowerDefenseHud = () => {
     advancing,
     autoAdvance,
     setGameOverDismissed,
+    readOnly,
   } = useTowerDefense()
 
   const view = predicted ?? confirmed
@@ -106,8 +107,10 @@ const TowerDefenseHud = () => {
   // real-time ceiling and can't proceed without a chain push that we surface it
   // (plus while an advance is already in flight, so the spinner stays put).
   // Suppressed on game over and while auto-run drives the chain itself.
+  // While spectating we can't push another player's chain, so no advance button.
   const needsPush = backlog && stalled
-  const showAdvance = (needsPush || advancing) && !gameOver && !autoAdvance
+  const showAdvance =
+    (needsPush || advancing) && !gameOver && !autoAdvance && !readOnly
   const needsAttention = needsPush && !advancing
 
   return (
@@ -156,19 +159,25 @@ const TowerDefenseHud = () => {
           Wave {view.waveNumber}
         </Text>
         {gameOver ? (
-          <Tooltip label="View run summary" hasArrow openDelay={300}>
-            <Badge
-              as="button"
-              type="button"
-              colorScheme="red"
-              fontSize="sm"
-              cursor="pointer"
-              onClick={() => setGameOverDismissed(false)}
-              _hover={{ opacity: 0.85 }}
-            >
+          readOnly ? (
+            <Badge colorScheme="red" fontSize="sm">
               Game over
             </Badge>
-          </Tooltip>
+          ) : (
+            <Tooltip label="View run summary" hasArrow openDelay={300}>
+              <Badge
+                as="button"
+                type="button"
+                colorScheme="red"
+                fontSize="sm"
+                cursor="pointer"
+                onClick={() => setGameOverDismissed(false)}
+                _hover={{ opacity: 0.85 }}
+              >
+                Game over
+              </Badge>
+            </Tooltip>
+          )
         ) : (
           <Text fontSize="sm" color="gray.300">
             {view.currentTick >= view.nextWaveTick

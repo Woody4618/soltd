@@ -100,6 +100,13 @@ interface TowerDefenseContextValue {
   jackpotSol: number
   refreshHighscore: () => Promise<void>
   payoutHighscore: () => Promise<void>
+  // Spectator mode: when set, the board being viewed belongs to another player
+  // (read-only). `readOnly` is true whenever we're watching someone else's
+  // board, which disables all write actions in the UI. `spectate(null)` returns
+  // to the connected wallet's own game.
+  spectateKey: PublicKey | null
+  readOnly: boolean
+  spectate: (player: PublicKey | null) => void
 }
 
 const TowerDefenseContext = createContext<TowerDefenseContextValue>({
@@ -126,6 +133,9 @@ const TowerDefenseContext = createContext<TowerDefenseContextValue>({
   jackpotSol: 0,
   refreshHighscore: async () => {},
   payoutHighscore: async () => {},
+  spectateKey: null,
+  readOnly: false,
+  spectate: () => {},
 })
 
 export const useTowerDefense = () => useContext(TowerDefenseContext)
@@ -242,6 +252,20 @@ export const TowerDefenseProvider = ({
   // Player dismissed the game-over popup (to inspect the final board). The HUD
   // "Game over" button flips this back to false to reopen the summary.
   const [gameOverDismissed, setGameOverDismissed] = useState(false)
+
+  // Spectator mode. When set to another player's wallet, the board-loading
+  // effect subscribes to THAT player's board PDA (read-only) instead of the
+  // connected wallet's. Boards are public accounts, so this needs no signature
+  // and no program change - we just fetch + live-animate their game with the
+  // same prediction engine. `readOnly` gates every write action.
+  const [spectateKey, setSpectateKey] = useState<PublicKey | null>(null)
+  const readOnly = spectateKey != null
+  // The wallet whose board we're currently viewing (spectated player, else me).
+  const viewKey = spectateKey ?? publicKey ?? null
+  // Mirror readOnly into a ref so the write callbacks (which intentionally omit
+  // it from their dep arrays) can bail synchronously without being recreated.
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
 
   // Smooth playback model.
   //
@@ -459,11 +483,14 @@ export const TowerDefenseProvider = ({
     resetGuardAtRef.current = 0
     gameOverBoardRef.current = null
     pendingSpendsRef.current = []
-    if (!publicKey) {
+    // Never auto-drive someone else's chain (and don't carry a stale auto-run
+    // into a spectated game). The effect re-runs on every view switch.
+    setAutoAdvance(false)
+    if (!viewKey) {
       setBoardPDA(null)
       return
     }
-    const pda = boardPda(publicKey)
+    const pda = boardPda(viewKey)
     setBoardPDA(pda)
 
     let sub: number | null = null
@@ -501,7 +528,7 @@ export const TowerDefenseProvider = ({
       cancelled = true
       if (sub !== null) connection.removeAccountChangeListener(sub)
     }
-  }, [publicKey, connection, applyConfirmed])
+  }, [viewKey, connection, applyConfirmed])
 
   // Render loop: advance the free-running playback clock at real time, then
   // deterministically simulate from the newest confirmed board at or before
@@ -952,6 +979,7 @@ export const TowerDefenseProvider = ({
 
   const initBoard = useCallback(async () => {
     if (!publicKey || !boardPDA) return
+    if (readOnlyRef.current) return
     setBusy(true)
     try {
       // Make sure the highscore singleton exists before the first game (it's a
@@ -1007,6 +1035,7 @@ export const TowerDefenseProvider = ({
 
   const resetBoard = useCallback(async () => {
     if (!publicKey || !boardPDA) return
+    if (readOnlyRef.current) return
     setBusy(true)
     setAutoAdvance(false)
     // Arm the reset guard so any lagging pre-reset account update (old tick/units)
@@ -1131,6 +1160,10 @@ export const TowerDefenseProvider = ({
   const placeTower = useCallback(
     async (x: number, y: number, kind: number = selectedKind) => {
       if (!publicKey || !boardPDA) return
+      if (readOnlyRef.current) {
+        notify("You're watching another player's game — you can't build here.")
+        return
+      }
       const def = towerDef(kind)
       if (!def) {
         notify("Unknown tower type.")
@@ -1251,6 +1284,10 @@ export const TowerDefenseProvider = ({
   const upgradeTower = useCallback(
     async (towerIndex: number) => {
       if (!publicKey || !boardPDA) return
+      if (readOnlyRef.current) {
+        notify("You're watching another player's game — you can't upgrade here.")
+        return
+      }
       // The upgrade targets a tower SLOT INDEX on-chain, so the index must exist
       // on the CONFIRMED board (chain truth). A stale confirmed board (e.g. after
       // a reset/redeploy the account had fewer towers than what we last rendered)
@@ -1477,6 +1514,8 @@ export const TowerDefenseProvider = ({
   // fast-forwards past real time.
   const advance = useCallback(async () => {
     if (!publicKey || !boardPDA) return
+    // Can't drive another player's chain - their board is read-only to us.
+    if (readOnlyRef.current) return
     if (advancingRef.current) return
     // The chain rejects advance_game once lives hit 0 (GameOver). Stop here so
     // we don't spam failing transactions; also switch off any auto-run loop.
@@ -1635,6 +1674,51 @@ export const TowerDefenseProvider = ({
     return () => clearInterval(id)
   }, [autoAdvance, advance])
 
+  // Enter/leave spectator mode. Watching your OWN wallet is a no-op (just stay
+  // on your live game). Also mirrors the choice into the URL (?watch=<pubkey>)
+  // so the current view is shareable / bookmarkable / joinable.
+  const spectate = useCallback(
+    (player: PublicKey | null) => {
+      // No-op when asked to watch yourself.
+      if (player && publicKey && player.equals(publicKey)) {
+        player = null
+      }
+      setSpectateKey(player)
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href)
+        if (player) url.searchParams.set("watch", player.toBase58())
+        else url.searchParams.delete("watch")
+        window.history.replaceState(null, "", url.toString())
+      }
+    },
+    [publicKey]
+  )
+
+  // On first load (and whenever the connected wallet changes), adopt a
+  // ?watch=<pubkey> URL param so a shared link drops you straight into that
+  // player's game. Ignored if it points at your own wallet or isn't a valid
+  // pubkey. Runs once per wallet so we don't fight the user's later clicks.
+  const watchParamAppliedRef = useRef(false)
+  useEffect(() => {
+    if (watchParamAppliedRef.current) return
+    if (typeof window === "undefined") return
+    const raw = new URL(window.location.href).searchParams.get("watch")
+    if (!raw) {
+      watchParamAppliedRef.current = true
+      return
+    }
+    try {
+      const key = new PublicKey(raw)
+      watchParamAppliedRef.current = true
+      if (!publicKey || !key.equals(publicKey)) {
+        setSpectateKey(key)
+      }
+    } catch {
+      // Malformed pubkey in the URL - ignore and clean it up.
+      watchParamAppliedRef.current = true
+    }
+  }, [publicKey])
+
   const value = useMemo<TowerDefenseContextValue>(
     () => ({
       boardPDA,
@@ -1660,6 +1744,9 @@ export const TowerDefenseProvider = ({
       jackpotSol,
       refreshHighscore,
       payoutHighscore,
+      spectateKey,
+      readOnly,
+      spectate,
     }),
     [
       boardPDA,
@@ -1682,6 +1769,9 @@ export const TowerDefenseProvider = ({
       jackpotSol,
       refreshHighscore,
       payoutHighscore,
+      spectateKey,
+      readOnly,
+      spectate,
     ]
   )
 

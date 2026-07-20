@@ -16,9 +16,15 @@ import TowerDefensePanel from "@/components/TowerDefensePanel"
 import TowerDefenseHowToPlay from "@/components/TowerDefenseHowToPlay"
 import TowerDefenseLeaderboard from "@/components/TowerDefenseLeaderboard"
 import TowerDefenseGameOverModal from "@/components/TowerDefenseGameOverModal"
+import SpectatorBanner from "@/components/SpectatorBanner"
+import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
 
 export default function Home() {
   const { publicKey } = useWallet()
+  const { spectateKey, readOnly } = useTowerDefense()
+  // Show the game view when connected OR when watching a shared link (a
+  // spectator doesn't need a wallet to watch a public board).
+  const showGame = !!publicKey || !!spectateKey
 
   return (
     <Box
@@ -42,8 +48,8 @@ export default function Home() {
       </Flex>
 
       <VStack spacing={4} py={2}>
-        {!publicKey && <Text>Connect a devnet wallet to play.</Text>}
-        {publicKey && (
+        {!showGame && <Text>Connect a devnet wallet to play.</Text>}
+        {showGame && (
           <Flex
             gap={4}
             align="flex-start"
@@ -53,6 +59,7 @@ export default function Home() {
           >
             {/* Left column: stats above the board; how-to below it. */}
             <VStack spacing={3} align="stretch" w={`${BOARD_SIZE}px`}>
+              <SpectatorBanner />
               <TowerDefenseHud />
               <TowerDefenseBoard />
               <TowerDefenseHowToPlay />
@@ -60,14 +67,17 @@ export default function Home() {
             {/* Right column: daily highscore + jackpot, then game controls. */}
             <VStack spacing={4} align="stretch">
               <TowerDefenseLeaderboard />
-              <TowerDefensePanel />
+              {/* Own game controls only make sense for the connected player,
+                  never while watching someone else's read-only board. */}
+              {publicKey && !readOnly && <TowerDefensePanel />}
             </VStack>
           </Flex>
         )}
       </VStack>
 
-      {/* Game-over popup (translucent, board still visible behind). */}
-      {publicKey && <TowerDefenseGameOverModal />}
+      {/* Game-over popup (translucent, board still visible behind). Suppressed
+          while spectating - it's not your game to restart. */}
+      {publicKey && !readOnly && <TowerDefenseGameOverModal />}
     </Box>
   )
 }
