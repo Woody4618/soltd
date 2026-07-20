@@ -45,8 +45,8 @@ pub const PAYOUT_WINNERS: usize = 3;
 pub const PAYOUT_SHARES_PERCENT: [u64; PAYOUT_WINNERS] = [60, 30, 10];
 
 // The highscore can be reset (and the jackpot paid out) at most once per
-// cooldown window by anyone. "Once a day" for now.
-pub const HIGHSCORE_RESET_COOLDOWN_SECONDS: i64 = 86_400; // 24h
+// cooldown window by anyone. Lowered to 5 minutes for testing (was 24h).
+pub const HIGHSCORE_RESET_COOLDOWN_SECONDS: i64 = 300; // 5 min
 
 // PDA seeds (named so client + program can't drift).
 // NOTE: the jackpot pool is a PROGRAM-OWNED data account (Account<Pricepool>),

@@ -9,13 +9,22 @@ import {
 } from "react"
 import {
   ComputeBudgetProgram,
+  Keypair,
   PublicKey,
   SendTransactionError,
   SystemProgram,
 } from "@solana/web3.js"
-import { useConnection, useWallet } from "@solana/wallet-adapter-react"
+import {
+  useAnchorWallet,
+  useConnection,
+  useWallet,
+} from "@solana/wallet-adapter-react"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { useToast } from "@chakra-ui/react"
+import {
+  buildCreateSessionIx,
+  persistSession,
+} from "@/utils/tdSession"
 import {
   program,
   boardPda,
@@ -47,6 +56,14 @@ import {
 // instead of clamping backwards. The program's own real-time budget still caps
 // how many ticks actually apply, so this never fast-forwards past real time.
 const SETTLE_LOOKAHEAD_TICKS = 10
+
+// Auto-session parameters. When a player starts/resets a game without a valid
+// session, we bundle a Gum `create_session` instruction into the same
+// transaction so hands-free auto-run works immediately with a single approval.
+// The top-up funds the session signer to pay for its own advance-tx fees; it's
+// refundable when the session is revoked.
+const SESSION_EXPIRY_MINUTES = 24 * 60 // SDK cap; longest possible.
+const SESSION_TOPUP_LAMPORTS = 0.02 * 1e9
 
 interface TowerDefenseContextValue {
   boardPDA: PublicKey | null
@@ -119,6 +136,7 @@ export const TowerDefenseProvider = ({
   children: React.ReactNode
 }) => {
   const { publicKey, sendTransaction } = useWallet()
+  const anchorWallet = useAnchorWallet()
   const { connection } = useConnection()
   const sessionWallet = useSessionWallet()
   const toast = useToast()
@@ -643,7 +661,7 @@ export const TowerDefenseProvider = ({
   // result) so the real Anchor error is visible in the console instead of an
   // opaque "unknown action"/"failed to send" message.
   const sendMain = useCallback(
-    async (tx: any) => {
+    async (tx: any, extraSigners?: Keypair[]) => {
       try {
         // Simulate ourselves FIRST. The wallet adapter's sendTransaction wraps
         // any RPC failure in an opaque "WalletSendTransactionError: Unexpected
@@ -658,6 +676,12 @@ export const TowerDefenseProvider = ({
             tx.recentBlockhash = (
               await connection.getLatestBlockhash("confirmed")
             ).blockhash
+          }
+          // Extra signers (e.g. a freshly-generated session keypair being
+          // created in the same tx) must partial-sign before simulation so the
+          // signature set is complete.
+          if (extraSigners && extraSigners.length > 0) {
+            tx.partialSign(...extraSigners)
           }
           const sim = await connection.simulateTransaction(tx)
           if (sim.value.err) {
@@ -675,7 +699,9 @@ export const TowerDefenseProvider = ({
           }
         }
 
-        const sig = await sendTransaction(tx, connection)
+        const sig = await sendTransaction(tx, connection, {
+          signers: extraSigners ?? [],
+        })
         const conf = await connection.confirmTransaction(sig, "confirmed")
         if (conf.value.err) {
           // Landed but failed: fetch the confirmed tx to read its logs.
@@ -808,6 +834,36 @@ export const TowerDefenseProvider = ({
     }
   }, [publicKey, sendMain, refreshHighscore, notify, reportError])
 
+  // If there's no valid session, prepare a Gum `create_session` instruction +
+  // its ephemeral keypair so it can be BUNDLED into the start/reset transaction
+  // (one wallet approval creates the session AND starts the game). Returns null
+  // when a usable session already exists (nothing to bundle). The caller must,
+  // after the tx confirms, call `persistSession` so the SDK picks it up.
+  const prepareSessionIfNeeded = useCallback(async () => {
+    if (!anchorWallet || !publicKey) return null
+    // Already have a session that's still valid on-chain? Nothing to do.
+    if (sessionWallet?.sessionToken) {
+      const ok = await sessionTokenValid(
+        sessionWallet.sessionToken as string
+      ).catch(() => false)
+      if (ok) return null
+    }
+    try {
+      return await buildCreateSessionIx(
+        anchorWallet,
+        connection,
+        program.programId,
+        SESSION_TOPUP_LAMPORTS,
+        SESSION_EXPIRY_MINUTES
+      )
+    } catch (e) {
+      // If session prep fails, fall back to starting the game WITHOUT a session
+      // (the player can still create one manually / play with wallet popups).
+      console.warn("prepareSessionIfNeeded failed:", (e as any)?.message ?? e)
+      return null
+    }
+  }, [anchorWallet, publicKey, sessionWallet, sessionTokenValid, connection])
+
   const initBoard = useCallback(async () => {
     if (!publicKey || !boardPDA) return
     setBusy(true)
@@ -815,6 +871,8 @@ export const TowerDefenseProvider = ({
       // Make sure the highscore singleton exists before the first game (it's a
       // one-time bootstrap; harmless if someone else already created it).
       await ensureHighscore()
+      // Auto-session: bundle create_session into the same tx when none exists.
+      const session = await prepareSessionIfNeeded()
       const tx = await program.methods
         .initBoard()
         .accountsPartial({
@@ -825,14 +883,33 @@ export const TowerDefenseProvider = ({
           systemProgram: SystemProgram.programId,
         })
         .transaction()
-      await sendMain(tx)
+      if (session) {
+        // Prepend so the session exists before init_board runs (order doesn't
+        // strictly matter here, but keeps intent clear).
+        tx.instructions.unshift(session.ix)
+      }
+      await sendMain(tx, session ? [session.sessionKeypair] : undefined)
+      if (session) {
+        // Tx confirmed: persist the session so the app can sign with it.
+        await persistSession(publicKey, session).catch((e) =>
+          console.warn("persistSession failed:", e?.message ?? e)
+        )
+      }
       await refresh()
     } catch (e) {
       reportError("Create board failed", e)
     } finally {
       setBusy(false)
     }
-  }, [publicKey, boardPDA, sendMain, refresh, reportError])
+  }, [
+    publicKey,
+    boardPDA,
+    sendMain,
+    refresh,
+    reportError,
+    ensureHighscore,
+    prepareSessionIfNeeded,
+  ])
 
   const resetBoard = useCallback(async () => {
     if (!publicKey || !boardPDA) return
@@ -846,6 +923,10 @@ export const TowerDefenseProvider = ({
     pendingPlacementsRef.current = []
     try {
       await ensureHighscore()
+      // Auto-session: bundle create_session into the reset tx when none exists
+      // (e.g. the previous session expired), so "New game" restores hands-free
+      // play with a single approval.
+      const session = await prepareSessionIfNeeded()
       const tx = await program.methods
         .resetBoard()
         .accountsPartial({
@@ -856,7 +937,15 @@ export const TowerDefenseProvider = ({
           systemProgram: SystemProgram.programId,
         })
         .transaction()
-      await sendMain(tx)
+      if (session) {
+        tx.instructions.unshift(session.ix)
+      }
+      await sendMain(tx, session ? [session.sessionKeypair] : undefined)
+      if (session) {
+        await persistSession(publicKey, session).catch((e) =>
+          console.warn("persistSession failed:", e?.message ?? e)
+        )
+      }
       // Fetch the freshly-reset account directly and snap the whole local model
       // to it. We DON'T rely solely on the subscription/refresh + tick-compare:
       // if the previous confirmed tick was already 0, that path would merge
@@ -881,7 +970,15 @@ export const TowerDefenseProvider = ({
     } finally {
       setBusy(false)
     }
-  }, [publicKey, boardPDA, sendMain, applyConfirmed, reportError])
+  }, [
+    publicKey,
+    boardPDA,
+    sendMain,
+    applyConfirmed,
+    reportError,
+    ensureHighscore,
+    prepareSessionIfNeeded,
+  ])
 
   // Build the compute-budget + advance_game instructions used to SETTLE the
   // chain up to the client's playback tick before a spend. The client predicts

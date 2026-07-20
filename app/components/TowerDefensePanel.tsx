@@ -66,6 +66,13 @@ const TowerDefensePanel = () => {
         <Button colorScheme="green" isLoading={busy} onClick={() => initBoard()}>
           Start game ({ENTRY_FEE_SOL} SOL)
         </Button>
+        {!hasSession && (
+          <Text fontSize="xs" color="gray.500" textAlign="center">
+            {ENTRY_FEE_SOL} SOL to start + 0.02 SOL to fund a play session
+            (refundable) — set up automatically in one approval so the game can
+            run hands-free.
+          </Text>
+        )}
       </VStack>
     )
   }
@@ -94,7 +101,7 @@ const TowerDefensePanel = () => {
         <Text fontSize="xs" color="gray.400" mt={0.5}>
           {hasSession
             ? "Hands-free play — the game advances itself."
-            : "Create a session above for hands-free play, or use the green Advance button in the stats bar to advance manually."}
+            : "Your play session expired. Start a New game to renew it, or use the green Advance button in the stats bar to advance manually."}
         </Text>
       </Box>
 
