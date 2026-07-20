@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect } from "react"
 import {
   Button,
   HStack,
@@ -48,7 +48,15 @@ const SummaryRow = ({
 // see-through card) so the final board state stays visible behind it. Shows a
 // run summary and a Start New Game button that resets the board.
 const TowerDefenseGameOverModal = () => {
-  const { confirmed, predicted, hasBoard, busy, resetBoard } = useTowerDefense()
+  const {
+    confirmed,
+    predicted,
+    hasBoard,
+    busy,
+    resetBoard,
+    gameOverDismissed,
+    setGameOverDismissed,
+  } = useTowerDefense()
 
   // Trigger the popup as soon as EITHER the confirmed OR the predicted
   // (played-ahead) board hits 0 lives. The killing leak may only be reflected
@@ -62,42 +70,22 @@ const TowerDefenseGameOverModal = () => {
   // (prefer confirmed once it has committed the loss).
   const board = confirmedOver ? confirmed : predictedOver ? predicted : confirmed
 
-  // Let the player dismiss the popup to inspect the final board. We reopen it
-  // automatically on each NEW game-over (edge-triggered): dismiss is cleared
-  // whenever the game is no longer over, so the next loss shows it again.
-  const [dismissed, setDismissed] = useState(false)
+  // Dismiss/reopen is shared via context so the HUD "Game over" button can
+  // reopen this popup. Auto-reopen on each NEW game-over (edge-triggered): the
+  // dismiss flag is cleared whenever the game is no longer over.
   useEffect(() => {
-    if (!isGameOver) setDismissed(false)
-  }, [isGameOver])
+    if (!isGameOver) setGameOverDismissed(false)
+  }, [isGameOver, setGameOverDismissed])
 
   // Seconds of game time survived (10 ticks = 1s).
   const seconds = board ? Math.floor(board.currentTick / 10) : 0
   const mm = String(Math.floor(seconds / 60)).padStart(2, "0")
   const ss = String(seconds % 60).padStart(2, "0")
 
-  // Small floating chip to reopen the summary after it's been dismissed.
-  if (isGameOver && dismissed) {
-    return (
-      <Button
-        position="fixed"
-        bottom={4}
-        right={4}
-        zIndex={20}
-        size="sm"
-        colorScheme="red"
-        variant="solid"
-        boxShadow="0 4px 16px rgba(0,0,0,0.5)"
-        onClick={() => setDismissed(false)}
-      >
-        Game over — view summary
-      </Button>
-    )
-  }
-
   return (
     <Modal
-      isOpen={isGameOver && !dismissed}
-      onClose={() => setDismissed(true)}
+      isOpen={isGameOver && !gameOverDismissed}
+      onClose={() => setGameOverDismissed(true)}
       isCentered
       closeOnOverlayClick
       closeOnEsc

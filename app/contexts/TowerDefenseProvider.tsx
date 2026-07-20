@@ -67,6 +67,11 @@ interface TowerDefenseContextValue {
   busy: boolean
   // True while an advance (manual or auto) drain loop is running.
   advancing: boolean
+  // Whether the player has dismissed the game-over summary popup. Lifted here so
+  // the HUD "Game over" button can reopen it (setGameOverDismissed(false)) while
+  // the modal owns the actual rendering.
+  gameOverDismissed: boolean
+  setGameOverDismissed: (v: boolean) => void
   initBoard: () => Promise<void>
   resetBoard: () => Promise<void>
   placeTower: (x: number, y: number, kind?: number) => Promise<void>
@@ -92,6 +97,8 @@ const TowerDefenseContext = createContext<TowerDefenseContextValue>({
   setSelectedKind: () => {},
   busy: false,
   advancing: false,
+  gameOverDismissed: false,
+  setGameOverDismissed: () => {},
   initBoard: async () => {},
   resetBoard: async () => {},
   placeTower: async () => {},
@@ -214,6 +221,9 @@ export const TowerDefenseProvider = ({
   // True while a manual/auto advance drain loop is in flight - drives the HUD
   // advance-arrow spinner so the player sees something is happening.
   const [advancing, setAdvancing] = useState(false)
+  // Player dismissed the game-over popup (to inspect the final board). The HUD
+  // "Game over" button flips this back to false to reopen the summary.
+  const [gameOverDismissed, setGameOverDismissed] = useState(false)
 
   // Smooth playback model.
   //
@@ -1403,6 +1413,8 @@ export const TowerDefenseProvider = ({
       setSelectedKind,
       busy,
       advancing,
+      gameOverDismissed,
+      setGameOverDismissed,
       initBoard,
       resetBoard,
       placeTower,
@@ -1424,6 +1436,7 @@ export const TowerDefenseProvider = ({
       selectedKind,
       busy,
       advancing,
+      gameOverDismissed,
       initBoard,
       resetBoard,
       placeTower,

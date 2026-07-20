@@ -47,8 +47,15 @@ const StatCell = ({
 // appears when the simulation has stopped progressing (so the player can nudge
 // the chain forward). Replaces the old stat grid + "Advance now" button.
 const TowerDefenseHud = () => {
-  const { predicted, confirmed, hasBoard, advance, advancing, autoAdvance } =
-    useTowerDefense()
+  const {
+    predicted,
+    confirmed,
+    hasBoard,
+    advance,
+    advancing,
+    autoAdvance,
+    setGameOverDismissed,
+  } = useTowerDefense()
 
   const view = predicted ?? confirmed
   const stats = predicted ?? confirmed
@@ -149,9 +156,19 @@ const TowerDefenseHud = () => {
           Wave {view.waveNumber}
         </Text>
         {gameOver ? (
-          <Badge colorScheme="red" fontSize="sm">
-            Game over
-          </Badge>
+          <Tooltip label="View run summary" hasArrow openDelay={300}>
+            <Badge
+              as="button"
+              type="button"
+              colorScheme="red"
+              fontSize="sm"
+              cursor="pointer"
+              onClick={() => setGameOverDismissed(false)}
+              _hover={{ opacity: 0.85 }}
+            >
+              Game over
+            </Badge>
+          </Tooltip>
         ) : (
           <Text fontSize="sm" color="gray.300">
             {view.currentTick >= view.nextWaveTick

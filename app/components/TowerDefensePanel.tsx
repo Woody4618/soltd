@@ -100,12 +100,13 @@ const TowerDefensePanel = () => {
 
       <Button
         size="sm"
-        colorScheme="red"
-        variant="outline"
+        colorScheme={gameOver ? "green" : "red"}
+        variant={gameOver ? "solid" : "outline"}
+        fontWeight={gameOver ? "bold" : undefined}
         isLoading={busy}
         onClick={() => resetBoard()}
       >
-        Reset game ({ENTRY_FEE_SOL} SOL)
+        {gameOver ? "New game" : "Reset game"} ({ENTRY_FEE_SOL} SOL)
       </Button>
     </VStack>
   )
