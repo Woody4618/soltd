@@ -4,16 +4,12 @@ import {
   AccordionIcon,
   AccordionItem,
   AccordionPanel,
-  Badge,
   Box,
   Button,
   HStack,
   List,
   ListItem,
   SimpleGrid,
-  Stat,
-  StatLabel,
-  StatNumber,
   Switch,
   Text,
   VStack,
@@ -23,10 +19,10 @@ import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
 import {
   TOWER_BASIC_COST,
-  TOWER_UPGRADE_COST,
   TOWER_DEFS,
   TOWER_KIND_BASIC,
   TOWER_KIND_SPLASH,
+  TOWER_KIND_SLOW,
 } from "@/utils/anchor"
 
 // Build-menu entries. Costs come from the generated TOWER_DEFS table so they
@@ -44,6 +40,12 @@ const TOWER_MENU = [
     desc: "AoE — hits nearby enemies",
     accent: "#ff922b",
   },
+  {
+    kind: TOWER_KIND_SLOW,
+    name: "Slow",
+    desc: "Chills enemies in range — they crawl",
+    accent: "#4dd4c0",
+  },
 ]
 
 const TowerDefensePanel = () => {
@@ -57,22 +59,15 @@ const TowerDefensePanel = () => {
     busy,
     autoAdvance,
     setAutoAdvance,
-    selectedKind,
-    setSelectedKind,
     initBoard,
     resetBoard,
-    advance,
   } = useTowerDefense()
 
   if (!publicKey) return null
 
   const hasSession = !!(sessionWallet && sessionWallet.sessionToken)
-  // Both readouts follow the PREDICTED playback board. Predicted gold is now
-  // truly spendable: a build/upgrade bundles an advance_game that settles the
-  // chain up to the playback tick first, so pending kills (and their gold) are
-  // confirmed before the spend is checked. Falls back to confirmed until the
-  // first predicted frame exists.
-  const view = predicted ?? confirmed
+  // Game-over gates the auto-run switch. Follows the predicted playback board,
+  // falling back to confirmed until the first predicted frame exists.
   const stats = predicted ?? confirmed
   const gameOver = stats != null && stats.lives <= 0
 
@@ -107,116 +102,51 @@ const TowerDefensePanel = () => {
     )
   }
 
-  const nextWaveSecs =
-    view && view.currentTick < view.nextWaveTick
-      ? Math.max(0, Math.ceil((view.nextWaveTick - view.currentTick) / 10))
-      : 0
-
   return (
     <VStack
       spacing={3}
       align="stretch"
-      w="260px"
+      w="240px"
       p={3}
       bg="#151822"
       border="1px solid #2b2f3a"
       borderRadius="md"
     >
-      <SimpleGrid columns={2} spacingX={3} spacingY={1}>
-        <Stat size="sm">
-          <StatLabel fontSize="xs">Lives</StatLabel>
-          <StatNumber
-            fontSize="xl"
-            color={stats && stats.lives <= 3 ? "red.300" : "white"}
-          >
-            {stats?.lives ?? "-"}
-          </StatNumber>
-        </Stat>
-        <Stat size="sm">
-          <StatLabel fontSize="xs">Gold</StatLabel>
-          <StatNumber fontSize="xl" color="yellow.300">
-            {stats?.gold ?? "-"}
-          </StatNumber>
-        </Stat>
-        <Stat size="sm">
-          <StatLabel fontSize="xs">Kills</StatLabel>
-          <StatNumber fontSize="xl">{stats?.kills ?? "-"}</StatNumber>
-        </Stat>
-        <Stat size="sm">
-          <StatLabel fontSize="xs">Tick</StatLabel>
-          <StatNumber fontSize="xl">{view?.currentTick ?? "-"}</StatNumber>
-        </Stat>
-      </SimpleGrid>
-
-      {view && (
-        <HStack
-          justify="space-between"
-          fontSize="xs"
-          color="gray.300"
-          bg="#1a1d27"
-          px={2}
-          py={1}
-          borderRadius="sm"
-        >
-          <Text>
-            Wave <b>{view.waveNumber}</b>
-          </Text>
-          <Text>
-            {view.currentTick >= view.nextWaveTick
-              ? "Wave incoming…"
-              : `Next in ${nextWaveSecs}s`}
-          </Text>
-        </HStack>
-      )}
-
-      {gameOver && (
-        <Badge colorScheme="red" fontSize="sm" py={1} textAlign="center">
-          Game over
-        </Badge>
-      )}
-
-      {/* Build menu: pick which tower a tile-click places. */}
-      <Box borderTop="1px solid #2b2f3a" pt={2}>
-        <Text fontSize="xs" color="gray.400" mb={1}>
-          Build (click a tile to place)
+      {/* How to build/upgrade now that the buttons are gone. */}
+      <Box>
+        <Text fontSize="sm" fontWeight="bold" mb={1}>
+          Build &amp; upgrade
         </Text>
-        <SimpleGrid columns={2} spacing={2}>
+        <Text fontSize="xs" color="gray.400">
+          <b>Click an empty tile</b> to open the build ring, then pick a tower.
+          <b> Click a placed tower</b> to upgrade it (cost depends on type).
+        </Text>
+        <SimpleGrid columns={1} spacing={1} mt={2}>
           {TOWER_MENU.map((m) => {
             const cost = TOWER_DEFS[m.kind - 1]?.cost ?? 0
-            const active = selectedKind === m.kind
             return (
-              <Button
-                key={m.kind}
-                size="sm"
-                height="auto"
-                py={1.5}
-                variant={active ? "solid" : "outline"}
-                borderColor={m.accent}
-                bg={active ? m.accent : "transparent"}
-                color={active ? "#0f1117" : m.accent}
-                _hover={{ bg: active ? m.accent : "#1a1d27" }}
-                isDisabled={gameOver}
-                onClick={() => setSelectedKind(m.kind)}
-              >
-                <VStack spacing={0} lineHeight={1.15}>
-                  <Text fontSize="sm" fontWeight="bold">
-                    {m.name}
-                  </Text>
-                  <Text fontSize="10px" opacity={0.9}>
-                    {cost}g
-                  </Text>
-                </VStack>
-              </Button>
+              <HStack key={m.kind} spacing={2} fontSize="xs">
+                <Box
+                  w="10px"
+                  h="10px"
+                  borderRadius="sm"
+                  bg={m.accent}
+                  flexShrink={0}
+                />
+                <Text fontWeight="bold" color={m.accent} minW="42px">
+                  {m.name}
+                </Text>
+                <Text color="gray.400" flex={1}>
+                  {m.desc}
+                </Text>
+                <Text color="gray.300">{cost}g</Text>
+              </HStack>
             )
           })}
         </SimpleGrid>
-        <Text fontSize="10px" color="gray.500" mt={1}>
-          {TOWER_MENU.find((m) => m.kind === selectedKind)?.desc}. Click a tower
-          to upgrade it ({TOWER_UPGRADE_COST}g).
-        </Text>
       </Box>
 
-      {/* Advance controls */}
+      {/* Advance / auto-run controls */}
       <Box borderTop="1px solid #2b2f3a" pt={2}>
         <HStack justify="space-between">
           <Text fontSize="sm">Auto-run</Text>
@@ -227,20 +157,11 @@ const TowerDefensePanel = () => {
             onChange={(e) => setAutoAdvance(e.target.checked)}
           />
         </HStack>
-        {!hasSession && (
-          <Text fontSize="xs" color="gray.400" mt={0.5}>
-            Create a session above for hands-free play.
-          </Text>
-        )}
-        <Button
-          size="sm"
-          mt={2}
-          width="100%"
-          isDisabled={gameOver}
-          onClick={() => advance()}
-        >
-          Advance now
-        </Button>
+        <Text fontSize="xs" color="gray.400" mt={0.5}>
+          {hasSession
+            ? "Hands-free play — the game advances itself."
+            : "Create a session above for hands-free play, or use the green Advance button in the stats bar to advance manually."}
+        </Text>
       </Box>
 
       <Button
@@ -274,11 +195,16 @@ const TowerDefensePanel = () => {
                 advance itself without a wallet popup each tick.
               </ListItem>
               <ListItem>
-                <b>Build towers:</b> pick a type in the <b>Build</b> menu, then
-                click any empty (dark) tile to place it. <b>Basic</b> (
+                <b>Build towers:</b> click any empty (dark) tile to open the{" "}
+                <b>build ring</b>, then pick a tower. <b>Basic</b> (
                 {TOWER_BASIC_COST}g) is a long-range single-target shooter;{" "}
                 <b>Splash</b> hits every enemy near its target — great for
-                clustered waves. You can’t build on the orange <b>path</b> tiles.
+                clustered waves;{" "}
+                <b style={{ color: "#4dd4c0" }}>Slow</b> (
+                {TOWER_DEFS[TOWER_KIND_SLOW - 1]?.cost}g) sprays a chilling mist
+                that makes every enemy in range crawl — deals little damage
+                itself, so pair it with a shooter at a chokepoint. You can’t
+                build on the orange <b>path</b> tiles.
               </ListItem>
               <ListItem>
                 Towers take ~3s to build before they shoot, then fire at the enemy
@@ -298,8 +224,10 @@ const TowerDefensePanel = () => {
                 wave — huge HP and a big bounty.
               </ListItem>
               <ListItem>
-                <b>Advance:</b> flip on <b>Auto-run</b> (needs a session) or tap{" "}
-                <b>Advance now</b>. Time only moves when you advance.
+                <b>Advance:</b> flip on <b>Auto-run</b> (needs a session), or
+                use the green <b>Advance</b> button in the stats bar to push the
+                game forward (it pulses when time has stalled). Time only moves
+                when you advance.
               </ListItem>
               <ListItem>
                 Kill enemies for <b>gold</b> and <b>kills</b>; spend gold on more
@@ -308,8 +236,10 @@ const TowerDefensePanel = () => {
                 tower keeps firing at its current power until they land.
               </ListItem>
               <ListItem>
-                Every enemy that reaches the red end costs a <b>life</b>. Hit 0 and
-                it’s <b>game over</b> — press <b>Reset game</b>.
+                Every enemy that reaches the red end costs a <b>life</b>. Hit 0
+                and it’s <b>game over</b> — a summary pops up with a{" "}
+                <b>Start New Game</b> button (you can also <b>Reset game</b> any
+                time).
               </ListItem>
             </List>
           </AccordionPanel>

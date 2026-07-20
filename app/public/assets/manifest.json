@@ -1,0 +1,326 @@
+{
+  "sprites": {
+    "snail": {
+      "src": "animations/snail-crawl.png",
+      "frames": 9,
+      "fps": 10,
+      "title": "Garden Snail — crawl"
+    },
+    "snail-sleep": {
+      "src": "animations/snail-sleep.png",
+      "frames": 9,
+      "fps": 6,
+      "title": "Garden Snail — sleep"
+    },
+    "snail-idle": {
+      "src": "sprites/snail.png",
+      "frames": 1,
+      "title": "Garden Snail — idle"
+    },
+    "snail-speedy": {
+      "src": "animations/snail-speedy-crawl.png",
+      "frames": 9,
+      "fps": 14,
+      "title": "Speedy Snail — crawl"
+    },
+    "snail-speedy-idle": {
+      "src": "sprites/snail-speedy.png",
+      "frames": 1,
+      "title": "Speedy Snail — idle"
+    },
+    "snail-big": {
+      "src": "animations/snail-big-crawl.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Big Snail — crawl"
+    },
+    "snail-big-idle": {
+      "src": "sprites/snail-big.png",
+      "frames": 1,
+      "title": "Big Snail — idle"
+    },
+    "boss-snail": {
+      "src": "animations/boss-snail-crawl.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Gourmet Boss Snail — crawl"
+    },
+    "boss-snail-idle": {
+      "src": "sprites/boss-snail.png",
+      "frames": 1,
+      "title": "Gourmet Boss Snail — idle"
+    },
+    "salt-monster": {
+      "src": "animations/salt-monster-march.png",
+      "frames": 9,
+      "fps": 9,
+      "title": "Salt-Shaker Monster — march"
+    },
+    "salt-monster-idle": {
+      "src": "sprites/salt-monster.png",
+      "frames": 1,
+      "title": "Salt-Shaker Monster — idle"
+    },
+    "beetle-taxi": {
+      "src": "animations/beetle-taxi-scuttle.png",
+      "frames": 9,
+      "fps": 12,
+      "title": "Beetle Taxi — scuttle"
+    },
+    "tower-catapult": {
+      "src": "animations/tower-catapult-throw.png",
+      "frames": 9,
+      "fps": 10,
+      "title": "Cucumber Catapult — throw"
+    },
+    "tower-catapult-idle": {
+      "src": "sprites/tower-catapult.png",
+      "frames": 1,
+      "title": "Cucumber Catapult — idle"
+    },
+    "tower-strawberry": {
+      "src": "animations/tower-strawberry-fire.png",
+      "frames": 9,
+      "fps": 10,
+      "title": "Strawberry Splatter — fire"
+    },
+    "tower-sprinkler": {
+      "src": "animations/tower-sprinkler-spray.png",
+      "frames": 9,
+      "fps": 9,
+      "title": "Herb Sprinkler — spray"
+    },
+    "tower-kitchen": {
+      "src": "animations/tower-kitchen-cook.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Mushroom Kitchen — cook"
+    },
+    "tower-lullaby": {
+      "src": "animations/tower-lullaby-sway.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Lullaby Flower — sway"
+    },
+    "tower-lullaby-idle": {
+      "src": "sprites/tower-lullaby.png",
+      "frames": 1,
+      "title": "Lullaby Flower — idle"
+    },
+    "tower-picnic": {
+      "src": "animations/tower-picnic-flutter.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Picnic Basket — flutter"
+    },
+    "golden-cucumber": {
+      "src": "animations/golden-cucumber-sparkle.png",
+      "frames": 9,
+      "fps": 8,
+      "title": "Golden Cucumber — sparkle"
+    },
+    "icon-cucumber-slice": {
+      "src": "sprites/icon-cucumber-slice.png",
+      "frames": 1,
+      "title": "Cucumber Slice"
+    },
+    "icon-strawberry": {
+      "src": "sprites/icon-strawberry.png",
+      "frames": 1,
+      "title": "Strawberry"
+    },
+    "icon-mint-mist": {
+      "src": "sprites/icon-mint-mist.png",
+      "frames": 1,
+      "title": "Mint Mist"
+    },
+    "icon-mushroom-snack": {
+      "src": "sprites/icon-mushroom-snack.png",
+      "frames": 1,
+      "title": "Mushroom Snack"
+    },
+    "icon-coin": {
+      "src": "sprites/icon-coin.png",
+      "frames": 1,
+      "title": "Coin"
+    },
+    "icon-trophy": {
+      "src": "sprites/icon-trophy.png",
+      "frames": 1,
+      "title": "Trophy"
+    },
+    "icon-zzz": {
+      "src": "sprites/icon-zzz.png",
+      "frames": 1,
+      "title": "ZZZ"
+    },
+    "icon-heart": {
+      "src": "sprites/icon-heart.png",
+      "frames": 1,
+      "title": "Heart"
+    },
+    "icon-cheese": {
+      "src": "sprites/icon-cheese.png",
+      "frames": 1,
+      "title": "Cheese"
+    },
+    "icon-bread": {
+      "src": "sprites/icon-bread.png",
+      "frames": 1,
+      "title": "Bread"
+    },
+    "icon-salt-pile": {
+      "src": "sprites/icon-salt-pile.png",
+      "frames": 1,
+      "title": "Salt Pile"
+    },
+    "icon-music-note": {
+      "src": "sprites/icon-music-note.png",
+      "frames": 1,
+      "title": "Music Note"
+    },
+    "ui-panel": {
+      "src": "ui/wooden-panel.png",
+      "frames": 1,
+      "title": "Wooden HUD Panel"
+    },
+    "tileset-grass-path": {
+      "src": "tiles/grass-path-tileset.png",
+      "frames": 1,
+      "title": "Grass ↔ Path Wang Tileset"
+    },
+    "beetle-taxi-idle": {
+      "src": "sprites/beetle-taxi.png",
+      "frames": 1,
+      "title": "Beetle Taxi — idle"
+    },
+    "tower-strawberry-idle": {
+      "src": "sprites/tower-strawberry.png",
+      "frames": 1,
+      "title": "Strawberry Splatter — idle"
+    },
+    "tower-sprinkler-idle": {
+      "src": "sprites/tower-sprinkler.png",
+      "frames": 1,
+      "title": "Herb Sprinkler — idle"
+    },
+    "tower-kitchen-idle": {
+      "src": "sprites/tower-kitchen.png",
+      "frames": 1,
+      "title": "Mushroom Kitchen — idle"
+    },
+    "tower-picnic-idle": {
+      "src": "sprites/tower-picnic.png",
+      "frames": 1,
+      "title": "Picnic Basket — idle"
+    },
+    "golden-cucumber-idle": {
+      "src": "sprites/golden-cucumber.png",
+      "frames": 1,
+      "title": "Golden Cucumber — idle"
+    },
+    "ui-card": {
+      "src": "ui/wooden-card.png",
+      "frames": 1,
+      "title": "Wooden Card (thin frame)"
+    },
+    "ui-button": {
+      "src": "ui/wooden-button.png",
+      "frames": 1,
+      "title": "Wooden Button"
+    },
+    "ui-sign": {
+      "src": "ui/wooden-sign.png",
+      "frames": 1,
+      "title": "Hanging Sign"
+    },
+    "puddle": {
+      "src": "sprites/puddle.png",
+      "frames": 1,
+      "title": "Water Puddle (melted salt)"
+    },
+    "umbrella": {
+      "src": "sprites/umbrella.png",
+      "frames": 1,
+      "title": "Beach Umbrella (salt monster's shield)"
+    }
+  },
+  "gallery_sections": [
+    {
+      "title": "Snails (the hungry guests)",
+      "items": [
+        "snail",
+        "snail-sleep",
+        "snail-idle",
+        "snail-speedy",
+        "snail-speedy-idle",
+        "snail-big",
+        "snail-big-idle",
+        "boss-snail",
+        "boss-snail-idle"
+      ]
+    },
+    {
+      "title": "Villain: Salt-Shaker Monster",
+      "items": [
+        "salt-monster",
+        "salt-monster-idle",
+        "icon-salt-pile",
+        "puddle",
+        "umbrella"
+      ]
+    },
+    {
+      "title": "Helpers",
+      "items": [
+        "beetle-taxi",
+        "beetle-taxi-idle",
+        "golden-cucumber",
+        "golden-cucumber-idle"
+      ]
+    },
+    {
+      "title": "Towers (food stations)",
+      "items": [
+        "tower-catapult",
+        "tower-catapult-idle",
+        "tower-strawberry",
+        "tower-strawberry-idle",
+        "tower-sprinkler",
+        "tower-sprinkler-idle",
+        "tower-kitchen",
+        "tower-kitchen-idle",
+        "tower-lullaby",
+        "tower-lullaby-idle",
+        "tower-picnic",
+        "tower-picnic-idle"
+      ]
+    },
+    {
+      "title": "Projectiles & Icons",
+      "items": [
+        "icon-cucumber-slice",
+        "icon-strawberry",
+        "icon-mint-mist",
+        "icon-mushroom-snack",
+        "icon-coin",
+        "icon-trophy",
+        "icon-zzz",
+        "icon-heart",
+        "icon-cheese",
+        "icon-bread",
+        "icon-music-note"
+      ]
+    },
+    {
+      "title": "UI & Tiles",
+      "items": [
+        "ui-panel",
+        "ui-card",
+        "ui-button",
+        "ui-sign",
+        "tileset-grass-path"
+      ]
+    }
+  ]
+}

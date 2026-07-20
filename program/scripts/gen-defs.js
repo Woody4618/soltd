@@ -77,6 +77,10 @@ if (enemyKinds.ENEMY_KIND_NORMAL === undefined)
 // --- BOSS_WAVE_INTERVAL (from constants.rs)
 const bossWaveInterval = evalExpr(readScalar("BOSS_WAVE_INTERVAL"));
 
+// --- Slow tower tuning (from constants.rs)
+const slowPercent = evalExpr(readScalar("SLOW_PERCENT"));
+const slowDurationTicks = evalExpr(readScalar("SLOW_DURATION_TICKS"));
+
 // --- TOWER_DEFS rows (from constants.rs). Field order is fixed by the struct.
 const DEF_FIELDS = [
   "cost",
@@ -215,6 +219,11 @@ ${enemyKindLines}
 
 // A boss is added on every Nth wave (0-indexed): waves 4, 9, 14, ...
 export const BOSS_WAVE_INTERVAL = ${bossWaveInterval}
+
+// Slow tower: hit enemies move SLOW_PERCENT% slower for SLOW_DURATION_TICKS
+// ticks (refreshed, not stacked). Mirrors the Rust constants.
+export const SLOW_PERCENT = ${slowPercent}
+export const SLOW_DURATION_TICKS = ${slowDurationTicks}
 
 // Base (wave-0) stats per enemy kind, indexed by kind id. Per-wave growth is
 // applied on top by the sim (see tdSim.ts).

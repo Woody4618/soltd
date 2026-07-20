@@ -32,7 +32,12 @@ pub fn advance_game(ctx: Context<AdvanceGame>, requested_ticks: u16, _counter: u
         .min(time_budget);
 
     if allowed > 0 {
-        board.apply_ticks(allowed);
+        // `apply_ticks` may apply FEWER than `allowed` ticks if it runs low on
+        // compute budget (dense board). Bookkeeping below uses the number
+        // ACTUALLY applied so the clock never runs ahead of the simulation; the
+        // client detects the shortfall (on-chain current_tick still behind its
+        // target) and simply calls advance_game again to drain the backlog.
+        let applied = board.apply_ticks(allowed);
 
         // Advance the clock only by the real time actually CONSUMED by the ticks
         // we applied - not all the way to `now`. If the caller requested fewer
@@ -41,7 +46,7 @@ pub fn advance_game(ctx: Context<AdvanceGame>, requested_ticks: u16, _counter: u
         // the NEXT advance can proceed immediately instead of waiting for fresh
         // seconds to accrue. Integer seconds; sub-second remainder is rounded
         // down and effectively rolls into the next call.
-        let consumed_seconds = allowed
+        let consumed_seconds = applied
             .saturating_mul(MS_PER_TICK as u64)
             .checked_div(1000)
             .unwrap_or(0) as i64;

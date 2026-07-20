@@ -25,6 +25,18 @@ pub const STARTING_GOLD: u32 = 200;
 pub const MS_PER_TICK: i64 = 100; // 10 ticks / second
 pub const MAX_TICKS_PER_SLICE: u64 = 256; // hard cap per advance_game call
 
+// Compute-budget guard for the tick loop (STATIC density cap - see
+// Board::max_safe_ticks). We can't use the runtime sol_remaining_compute_units
+// syscall (SIMD-0049 was withdrawn / never activated, so a program referencing
+// it fails to deploy). Instead we cap ticks-per-call at SAFE_TICK_BUDGET /
+// tower_count, since the dominant per-tick cost is O(tower_count * MAX_UNITS).
+// Empirically ~11 towers x 256 ticks (~2800 tick-tower units) exceeded 1.4M CU,
+// so we keep the product well below that: 1500 tick-tower units => e.g. 16
+// towers -> 93 ticks, 8 towers -> 187 ticks, 1 tower -> capped at
+// MAX_TICKS_PER_SLICE. Any shortfall is drained by the client calling
+// advance_game again.
+pub const SAFE_TICK_BUDGET: u64 = 1500;
+
 // Fixed-point movement. A unit's position along the path is measured in
 // sub-tiles. One full tile = SUBTILES_PER_TILE sub-tiles. Integer only.
 pub const SUBTILES_PER_TILE: u32 = 256;
@@ -65,7 +77,15 @@ pub struct TowerDef {
 
 // Number of real tower kinds (excludes TOWER_KIND_NONE). Adding a tower means
 // bumping this and appending to TOWER_DEFS.
-pub const TOWER_KIND_COUNT: usize = 2;
+pub const TOWER_KIND_COUNT: usize = 3;
+
+// Slow tower tuning. When a slow tower fires, every walking enemy within its
+// splash radius has its effective speed reduced by SLOW_PERCENT for
+// SLOW_DURATION_TICKS ticks. The debuff does NOT stack - each fresh hit just
+// refreshes the "slowed until" tick (the later of the current one and now +
+// duration). All integer math, so the TS client reproduces it bit-for-bit.
+pub const SLOW_PERCENT: u32 = 40; // 40% slower while debuffed
+pub const SLOW_DURATION_TICKS: u64 = 20; // ~2s at 10 ticks/s
 
 // Balance table. Row order MUST match the `TOWER_KIND_*` ids (row = kind - 1).
 // Hard mode: towers are pricier and hit a bit softer, so raw firepower alone
@@ -94,6 +114,22 @@ pub const TOWER_DEFS: [TowerDef; TOWER_KIND_COUNT] = [
         splash_radius_subtiles: SUBTILES_PER_TILE, // 1-tile blast radius
         upgrade_cost: 70,
         upgrade_damage_bonus: 5,           // added damage per level above 1
+        upgrade_range_bonus: SUBTILES_PER_TILE, // +1 tile targeting / level
+        max_level: 3,
+    },
+    // kind 3: SLOW. Support tower. Chills every enemy within its blast radius,
+    // cutting their speed by SLOW_PERCENT for SLOW_DURATION_TICKS (refreshed on
+    // each hit, no stacking). Deals only light damage - its value is keeping the
+    // lane crawling so your damage/splash towers get far more shots in. Best at a
+    // chokepoint where the path bunches up; pairs strongly with the splash tower.
+    TowerDef {
+        cost: 90,
+        range_subtiles: 2 * SUBTILES_PER_TILE,
+        damage: 2,                             // light chip damage (applied AoE)
+        cooldown_ticks: 8,
+        splash_radius_subtiles: SUBTILES_PER_TILE, // 1-tile slow field
+        upgrade_cost: 60,
+        upgrade_damage_bonus: 1,           // barely scales damage; it's a slower
         upgrade_range_bonus: SUBTILES_PER_TILE, // +1 tile targeting / level
         max_level: 3,
     },

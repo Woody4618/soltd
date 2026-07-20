@@ -23,11 +23,9 @@ import {
   MAX_TICKS_PER_SLICE,
   MAX_TOWERS,
   TOWER_BASIC_COST,
-  TOWER_UPGRADE_COST,
   TOWER_MAX_LEVEL,
+  TOWER_BUILD_TICKS,
   TOWER_UPGRADE_BUILD_TICKS,
-  TOWER_UPGRADE_DAMAGE_BONUS,
-  TOWER_UPGRADE_RANGE_BONUS,
   TOWER_KIND_BASIC,
   towerDef,
 } from "@/utils/anchor"
@@ -63,6 +61,8 @@ interface TowerDefenseContextValue {
   selectedKind: number
   setSelectedKind: (kind: number) => void
   busy: boolean
+  // True while an advance (manual or auto) drain loop is running.
+  advancing: boolean
   initBoard: () => Promise<void>
   resetBoard: () => Promise<void>
   placeTower: (x: number, y: number, kind?: number) => Promise<void>
@@ -82,6 +82,7 @@ const TowerDefenseContext = createContext<TowerDefenseContextValue>({
   selectedKind: TOWER_KIND_BASIC,
   setSelectedKind: () => {},
   busy: false,
+  advancing: false,
   initBoard: async () => {},
   resetBoard: async () => {},
   placeTower: async () => {},
@@ -193,6 +194,9 @@ export const TowerDefenseProvider = ({
   const [autoAdvance, setAutoAdvance] = useState(false)
   const [selectedKind, setSelectedKind] = useState<number>(TOWER_KIND_BASIC)
   const [busy, setBusy] = useState(false)
+  // True while a manual/auto advance drain loop is in flight - drives the HUD
+  // advance-arrow spinner so the player sees something is happening.
+  const [advancing, setAdvancing] = useState(false)
 
   // Smooth playback model.
   //
@@ -232,6 +236,14 @@ export const TowerDefenseProvider = ({
   // board, at which point the bar begins filling. Cleared once the confirmed
   // board reflects the pending upgrade (predicted derives it) or the action ends.
   const pendingUpgradesRef = useRef<Set<number>>(new Set())
+  // Optimistic tower PLACEMENTS not yet reflected on-chain. Each is injected as
+  // a greyed-out "building" tower into the rendered board the instant you pick
+  // it in the build ring, so the tower appears immediately (like the -gold
+  // blip) instead of after the confirmation round-trip. Keyed by tile so a
+  // placement is dropped once the confirmed board carries a tower on that tile.
+  const pendingPlacementsRef = useRef<
+    { x: number; y: number; kind: number }[]
+  >([])
   // Reset guard. reset_board rewinds the on-chain tick to 0, but a lagging
   // RPC/subscription can still deliver the PRE-reset board (high tick, old
   // units) a moment later - even AFTER we've applied the fresh tick-0 board.
@@ -349,6 +361,7 @@ export const TowerDefenseProvider = ({
     lastFrameRef.current = 0
     confirmedAtRef.current = 0
     pendingUpgradesRef.current.clear()
+    pendingPlacementsRef.current = []
     awaitingResetRef.current = false
     resetGuardUntilRef.current = 0
     resetGuardAtRef.current = 0
@@ -480,10 +493,57 @@ export const TowerDefenseProvider = ({
           })
         }
 
+        // Garbage-collect optimistic placements once the render anchor already
+        // has a real tower on that tile (same slot/index the program uses), so
+        // we don't draw the greyed-out ghost on top of the confirmed tower.
+        if (pendingPlacementsRef.current.length > 0) {
+          pendingPlacementsRef.current = pendingPlacementsRef.current.filter(
+            (p) =>
+              !anchor.towers.some(
+                (t) => t.kind !== 0 && t.x === p.x && t.y === p.y
+              )
+          )
+        }
+
         // Apply the optimistic upgrade overlay onto whatever board we're about
         // to render: show the cyan upgrade bar the instant you click.
         const upgrades = pendingUpgradesRef.current
+        const placements = pendingPlacementsRef.current
         const applyOverlays = (b: SimBoard) => {
+          // Optimistic placements: inject each as a greyed-out "building" tower
+          // into the next free slot so it appears the instant you click, pinned
+          // as still-building (readyAtTick a full build-time ahead) until the
+          // confirmed board carries the real tower. Skip if the tile is already
+          // occupied on this board (confirmed caught up between GC and here).
+          if (placements.length > 0) {
+            placements.forEach((p) => {
+              const occupied = b.towers.some(
+                (t) => t.kind !== 0 && t.x === p.x && t.y === p.y
+              )
+              if (occupied) return
+              const slot = b.towerCount
+              if (slot >= b.towers.length) return
+              const def = towerDef(p.kind)
+              const t = b.towers[slot]
+              t.kind = p.kind
+              t.level = 1
+              t.x = p.x
+              t.y = p.y
+              t.rangeSubtiles = def?.rangeSubtiles ?? 0
+              t.damage = def?.damage ?? 0
+              t.cooldownTicks = def?.cooldownTicks ?? 0
+              t.splashRadiusSubtiles = def?.splashRadiusSubtiles ?? 0
+              t.pendingLevel = 0
+              t.pendingDamage = 0
+              t.pendingRangeSubtiles = 0
+              t.lastShotTick = 0
+              // Pin as building: readyAtTick a full build-time ahead every frame
+              // so the grey "building" state + 0% bar shows until the real tower
+              // (with its true readyAtTick) arrives on the confirmed board.
+              t.readyAtTick = b.currentTick + TOWER_BUILD_TICKS
+              b.towerCount = slot + 1
+            })
+          }
           if (upgrades.size > 0) {
             upgrades.forEach((idx) => {
               const t = b.towers[idx]
@@ -497,17 +557,22 @@ export const TowerDefenseProvider = ({
                 // ahead of the current tick every frame. The bar only starts
                 // FILLING once the program responds with the real start tick
                 // (carried on the confirmed board), which anchors readyAtTick.
+                // Upgrade bonuses are per tower KIND, so read them from that
+                // tower's balance row (basic/splash/slow differ). This is only a
+                // transient preview - the confirmed board overrides it - but it
+                // keeps the preview honest.
+                const def = towerDef(t.kind)
                 t.pendingLevel = t.level + 1
-                t.pendingDamage = t.damage + TOWER_UPGRADE_DAMAGE_BONUS
+                t.pendingDamage = t.damage + (def?.upgradeDamageBonus ?? 0)
                 t.pendingRangeSubtiles =
-                  t.rangeSubtiles + TOWER_UPGRADE_RANGE_BONUS
+                  t.rangeSubtiles + (def?.upgradeRangeBonus ?? 0)
                 t.readyAtTick = b.currentTick + TOWER_UPGRADE_BUILD_TICKS
               }
             })
           }
         }
 
-        const hasOverlay = upgrades.size > 0
+        const hasOverlay = upgrades.size > 0 || placements.length > 0
         if (playTick <= anchor.currentTick) {
           if (hasOverlay) {
             const adj = cloneBoard(anchor)
@@ -659,6 +724,7 @@ export const TowerDefenseProvider = ({
     awaitingResetRef.current = true
     // Drop any optimistic overlays - the board is about to be wiped.
     pendingUpgradesRef.current.clear()
+    pendingPlacementsRef.current = []
     try {
       const tx = await program.methods
         .resetBoard()
@@ -763,6 +829,13 @@ export const TowerDefenseProvider = ({
           return
         }
       }
+      // Optimistic: show the greyed-out "building" tower immediately (removed in
+      // `finally` if the send fails; GC'd once the confirmed board carries it).
+      pendingPlacementsRef.current = [
+        ...pendingPlacementsRef.current.filter((p) => p.x !== x || p.y !== y),
+        { x, y, kind },
+      ]
+      let placed = false
       setBusy(true)
       try {
         const hasSession =
@@ -804,6 +877,7 @@ export const TowerDefenseProvider = ({
           await sendMain(tx)
         }
         await refresh()
+        placed = true
       } catch (e) {
         if (isSessionError(e)) {
           handleSessionInvalid()
@@ -812,6 +886,14 @@ export const TowerDefenseProvider = ({
         }
       } finally {
         setBusy(false)
+        // If the send failed, drop the optimistic ghost so it doesn't linger.
+        // On success we keep it: it's GC'd automatically once the confirmed
+        // board carries the real tower (avoids a flicker in between).
+        if (!placed) {
+          pendingPlacementsRef.current = pendingPlacementsRef.current.filter(
+            (p) => p.x !== x || p.y !== y
+          )
+        }
       }
     },
     [
@@ -874,9 +956,13 @@ export const TowerDefenseProvider = ({
           notify(`This tower is already at max level (${TOWER_MAX_LEVEL}).`)
           return
         }
-        if (board.gold < TOWER_UPGRADE_COST) {
+        // Upgrade cost is per tower KIND (basic/splash/slow differ) - read it
+        // from that tower's balance row so the client check matches what the
+        // program actually charges (tower_def(kind).upgrade_cost).
+        const upgradeCost = tower ? towerDef(tower.kind)?.upgradeCost ?? 0 : 0
+        if (board.gold < upgradeCost) {
           notify(
-            `Not enough gold to upgrade (need ${TOWER_UPGRADE_COST}, have ${board.gold}). Kill enemies to earn more.`
+            `Not enough gold to upgrade (need ${upgradeCost}, have ${board.gold}). Kill enemies to earn more.`
           )
           return
         }
@@ -960,8 +1046,75 @@ export const TowerDefenseProvider = ({
     ]
   )
 
-  // Advance the sim one slice. Prefers the session key (so it can run in a
-  // background loop without wallet popups); falls back to the main wallet.
+  // Send ONE advance_game slice and refresh. Returns the confirmed tick after
+  // the refresh, or null on failure. On a dense board the program applies FEWER
+  // than the requested ticks (it stops before it would exceed the CU budget),
+  // so one call may not fully catch up - see the drain loop in `advance`.
+  const advanceOnce = useCallback(async (): Promise<number | null> => {
+    if (!publicKey || !boardPDA) return null
+    const counter = advanceCounterRef.current++ % 65535
+    // The tick loop (up to MAX_TICKS_PER_SLICE ticks over towers x units) can
+    // exceed the default 200k CU budget, so request the max (1.4M). The program
+    // also self-limits ticks to stay under this ceiling.
+    const computeIx = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    })
+    const hasSession =
+      sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
+    if (hasSession) {
+      // Bail out before sending if the session already lapsed - avoids a
+      // guaranteed on-chain failure and lets the player renew.
+      if (!(await sessionTokenValid(sessionWallet.sessionToken as string))) {
+        handleSessionInvalid()
+        return null
+      }
+      const tx = await program.methods
+        .advanceGame(MAX_TICKS_PER_SLICE, counter)
+        .accountsPartial({
+          sessionToken: sessionWallet.sessionToken,
+          board: boardPDA,
+          authority: publicKey,
+          signer: sessionWallet.publicKey!,
+        })
+        .preInstructions([computeIx])
+        .transaction()
+      await sessionWallet.signAndSendTransaction!(tx)
+    } else {
+      const tx = await program.methods
+        .advanceGame(MAX_TICKS_PER_SLICE, counter)
+        .accountsPartial({
+          sessionToken: null,
+          board: boardPDA,
+          authority: publicKey,
+          signer: publicKey,
+        })
+        .preInstructions([computeIx])
+        .transaction()
+      const sig = await sendMain(tx)
+      console.log("advance_game tx", sig)
+    }
+    await refresh()
+    return confirmedRef.current?.currentTick ?? null
+  }, [
+    publicKey,
+    boardPDA,
+    sessionWallet,
+    sendMain,
+    refresh,
+    sessionTokenValid,
+    handleSessionInvalid,
+  ])
+
+  // Advance the sim. Prefers the session key (so it can run in a background loop
+  // without wallet popups); falls back to the main wallet.
+  //
+  // A single advance_game may apply fewer ticks than requested when the board is
+  // dense (the program stops short of the CU cap). To keep the chain caught up
+  // with the (real-time-bounded) client playback, we DRAIN: keep sending slices
+  // until either the chain reaches the client's target tick, a slice makes no
+  // forward progress, or we hit a safety cap on iterations. Each slice is still
+  // individually bounded by the program's real-time budget, so this never
+  // fast-forwards past real time.
   const advance = useCallback(async () => {
     if (!publicKey || !boardPDA) return
     if (advancingRef.current) return
@@ -972,48 +1125,27 @@ export const TowerDefenseProvider = ({
       return
     }
     advancingRef.current = true
-    const counter = advanceCounterRef.current++ % 65535
-    // The tick loop (up to MAX_TICKS_PER_SLICE ticks over towers x units) can
-    // exceed the default 200k CU budget, so request more (max is 1.4M).
-    const computeIx = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
-    })
+    setAdvancing(true)
+    // Target: where the client would like the chain to be (floor of playback).
+    // The chain caps itself to real time regardless, so this is just an upper
+    // bound on how hard we try to drain in one invocation.
+    const target = Math.floor(playbackTickRef.current)
+    // Safety cap: at most this many slices per invocation so a pathological
+    // board can't wedge the loop. One slice = up to MAX_TICKS_PER_SLICE ticks.
+    const MAX_DRAIN_SLICES = 6
     try {
-      const hasSession =
-        sessionWallet && sessionWallet.sessionToken && sessionWallet.publicKey
-      if (hasSession) {
-        // Bail out before sending if the session already lapsed - avoids a
-        // guaranteed on-chain failure and lets the player renew.
-        if (!(await sessionTokenValid(sessionWallet.sessionToken as string))) {
-          handleSessionInvalid()
-          return
-        }
-        const tx = await program.methods
-          .advanceGame(MAX_TICKS_PER_SLICE, counter)
-          .accountsPartial({
-            sessionToken: sessionWallet.sessionToken,
-            board: boardPDA,
-            authority: publicKey,
-            signer: sessionWallet.publicKey!,
-          })
-          .preInstructions([computeIx])
-          .transaction()
-        await sessionWallet.signAndSendTransaction!(tx)
-      } else {
-        const tx = await program.methods
-          .advanceGame(MAX_TICKS_PER_SLICE, counter)
-          .accountsPartial({
-            sessionToken: null,
-            board: boardPDA,
-            authority: publicKey,
-            signer: publicKey,
-          })
-          .preInstructions([computeIx])
-          .transaction()
-        const sig = await sendMain(tx)
-        console.log("advance_game tx", sig)
+      let iterations = 0
+      while (iterations < MAX_DRAIN_SLICES) {
+        iterations++
+        const before = confirmedRef.current?.currentTick ?? 0
+        const after = await advanceOnce()
+        if (after == null) break // failure / session bail - stop draining
+        // Stop if we're game over, caught up to the client target, or the slice
+        // made no forward progress (nothing left to apply / no time budget).
+        if ((confirmedRef.current?.lives ?? 1) <= 0) break
+        if (after >= target) break
+        if (after <= before) break
       }
-      await refresh()
     } catch (e: any) {
       if (isSessionError(e)) {
         handleSessionInvalid()
@@ -1025,16 +1157,14 @@ export const TowerDefenseProvider = ({
       }
     } finally {
       advancingRef.current = false
+      setAdvancing(false)
     }
   }, [
     publicKey,
     boardPDA,
-    sessionWallet,
-    sendMain,
-    refresh,
+    advanceOnce,
     autoAdvance,
     reportError,
-    sessionTokenValid,
     handleSessionInvalid,
     isSessionError,
   ])
@@ -1045,6 +1175,28 @@ export const TowerDefenseProvider = ({
       setAutoAdvance(false)
     }
   }, [confirmed, autoAdvance])
+
+  // Commit game-over on-chain. The losing leak first shows up in the local
+  // prediction; the chain only reflects it once an advance_game carries the sim
+  // past that tick. When the client predicts game over but the confirmed board
+  // still has lives, keep firing advance (retrying if a single drain stops
+  // short of the losing tick) until the chain reflects the loss - so the
+  // on-chain state, and anything reading it, matches what the player sees. A
+  // short throttle avoids spamming while an advance is in flight.
+  const lastGameOverPushRef = useRef(0)
+  useEffect(() => {
+    const predictedOver = predicted != null && predicted.lives <= 0
+    const confirmedOver = confirmed != null && confirmed.lives <= 0
+    // Once the chain reflects the loss (or there's no loss at all) there's
+    // nothing to push.
+    if (confirmedOver || !predictedOver) return
+    const now = Date.now()
+    // Throttle retries: advance() no-ops while one is already draining, and a
+    // dense end-game may need several slices, so retry at a modest cadence.
+    if (now - lastGameOverPushRef.current < 1500) return
+    lastGameOverPushRef.current = now
+    advance()
+  }, [predicted, confirmed, advance])
 
   // Auto-advance loop: while enabled and a session exists, push the sim forward
   // on an interval so the game runs itself. The on-chain time cap keeps it from
@@ -1069,6 +1221,7 @@ export const TowerDefenseProvider = ({
       selectedKind,
       setSelectedKind,
       busy,
+      advancing,
       initBoard,
       resetBoard,
       placeTower,
@@ -1085,6 +1238,7 @@ export const TowerDefenseProvider = ({
       autoAdvance,
       selectedKind,
       busy,
+      advancing,
       initBoard,
       resetBoard,
       placeTower,

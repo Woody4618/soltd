@@ -13,6 +13,7 @@ import {
   ENEMY_KIND_NORMAL,
   UNIT_STATE_QUEUED,
   UNIT_STATE_WALKING,
+  TOWER_KIND_SLOW,
 } from "./td_sim";
 
 const SESSION_PROGRAM_ID = new anchor.web3.PublicKey(
@@ -557,6 +558,124 @@ describe("towerdefense", () => {
     console.log("Splash parity held; kills", acc.kills);
   });
 
+  it("Slow tower chills enemies and matches the client sim", async () => {
+    const owner = anchor.web3.Keypair.generate();
+    const air = await provider.connection.requestAirdrop(owner.publicKey, 1e9);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [board] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("board"), owner.publicKey.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .initBoard()
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    // Place a SLOW tower (kind 3) at (1,0), next to the path start so the first
+    // path segment sits inside both its range and its slow field.
+    await program.methods
+      .placeTower(1, 0, TOWER_KIND_SLOW)
+      .accountsPartial({
+        board,
+        signer: owner.publicKey,
+        authority: owner.publicKey,
+        sessionToken: null,
+      })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    const placed = await program.account.board.fetch(board);
+    const slowTower = placed.towers[0];
+    assert.strictEqual(slowTower.kind, TOWER_KIND_SLOW, "kind should be slow");
+    assert.isAbove(
+      Number(slowTower.splashRadiusSubtiles),
+      0,
+      "slow tower must have a (slow-field) radius"
+    );
+
+    await program.methods
+      .spawnWave(4)
+      .accountsPartial({ board, signer: owner.publicKey })
+      .signers([owner])
+      .rpc({ skipPreflight: true });
+
+    // Snapshot into the client sim, advance on-chain in slices, and require the
+    // sim to reproduce the board bit-for-bit - this exercises the slow debuff
+    // (application on shot AND the reduced-speed movement) in both places.
+    // Separately assert that at least one unit actually gets slowed on-chain, so
+    // parity alone can't pass on a no-op.
+    const start = await program.account.board.fetch(board);
+    const predicted: SimBoard = fromChain(start);
+    let tickBefore = Number(start.currentTick);
+    let sawSlowedOnChain = false;
+
+    let acc = start;
+    for (let iter = 300; iter < 316; iter++) {
+      await new Promise((r) => setTimeout(r, 1200));
+      const sig = await program.methods
+        .advanceGame(50, iter)
+        .accountsPartial({
+          sessionToken: null,
+          board,
+          authority: owner.publicKey,
+          signer: owner.publicKey,
+        })
+        .signers([owner])
+        .rpc({ skipPreflight: true });
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      acc = await program.account.board.fetch(board);
+
+      // A unit is currently slowed if its slowed_until_tick is in the future.
+      for (const u of acc.units) {
+        if (Number(u.slowedUntilTick) > Number(acc.currentTick)) {
+          sawSlowedOnChain = true;
+        }
+      }
+
+      const applied = Number(acc.currentTick) - tickBefore;
+      tickBefore = Number(acc.currentTick);
+      if (applied > 0) applyTicks(predicted, applied);
+
+      // Parity: slow application, reduced movement, damage and rewards must all
+      // be identical client-side and on-chain, unit for unit.
+      const chain = fromChain(acc);
+      assert.strictEqual(predicted.kills, chain.kills, "kills parity");
+      assert.strictEqual(predicted.gold, chain.gold, "gold parity");
+      for (let i = 0; i < predicted.units.length; i++) {
+        assert.strictEqual(
+          predicted.units[i].hp,
+          chain.units[i].hp,
+          `unit ${i} hp parity`
+        );
+        assert.strictEqual(
+          predicted.units[i].progressSubtiles,
+          chain.units[i].progressSubtiles,
+          `unit ${i} progress parity`
+        );
+        assert.strictEqual(
+          predicted.units[i].slowedUntilTick,
+          chain.units[i].slowedUntilTick,
+          `unit ${i} slowedUntilTick parity`
+        );
+      }
+
+      if (Number(acc.currentTick) >= 80) break;
+    }
+
+    assert.isTrue(
+      sawSlowedOnChain,
+      "slow tower should apply a slow debuff to at least one enemy"
+    );
+    console.log("Slow parity held; kills", acc.kills);
+  });
+
   it("Advances via a session key and rejects a wrong authority", async () => {
     const owner = anchor.web3.Keypair.generate();
     const sessionSigner = anchor.web3.Keypair.generate();
@@ -773,10 +892,13 @@ describe("towerdefense", () => {
       .signers([owner])
       .rpc({ skipPreflight: true });
 
-    // Advance past WAVE_FIRST_DELAY_TICKS (40) so wave 0 spawns.
+    // Advance past WAVE_FIRST_DELAY_TICKS (40) so wave 0 spawns. The tick
+    // budget accrues from wall-clock, so under a loaded/slow localnet clock we
+    // may need several slices; give it generous headroom (this is purely a
+    // real-time gate, not a correctness property).
     let acc = await program.account.board.fetch(board);
-    for (let iter = 0; iter < 8 && Number(acc.waveNumber) < 1; iter++) {
-      await new Promise((r) => setTimeout(r, 1200));
+    for (let iter = 0; iter < 20 && Number(acc.waveNumber) < 1; iter++) {
+      await new Promise((r) => setTimeout(r, 1500));
       const sig = await program.methods
         .advanceGame(30, iter)
         .accountsPartial({

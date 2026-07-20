@@ -5,6 +5,7 @@ use anchor_lang::prelude::*;
 pub const TOWER_KIND_NONE: u8 = 0;
 pub const TOWER_KIND_BASIC: u8 = 1;
 pub const TOWER_KIND_SPLASH: u8 = 2;
+pub const TOWER_KIND_SLOW: u8 = 3;
 
 // Unit status flags stored as u8.
 pub const UNIT_STATE_EMPTY: u8 = 0; // slot unused
@@ -75,7 +76,12 @@ pub struct Unit {
     pub hp: u32,
     pub max_hp: u32,
     pub reward: u32,
-    pub _pad1: u32, // keep the following u64 fields 8-byte aligned (no implicit padding)
+    // Tick (truncated to u32) until which this unit is slowed by a slow tower.
+    // While `current_tick < slowed_until_tick` the unit moves at the reduced
+    // speed. 0 = not slowed. Occupies what used to be pure alignment padding, so
+    // the Unit layout/size is unchanged and existing on-chain boards stay valid.
+    // u32 caps at ~4.29B ticks (~13 years @ 10 tps) - far beyond any real game.
+    pub slowed_until_tick: u32,
     pub spawn_tick: u64,      // tick at which the unit starts walking
     pub progress_subtiles: u64, // distance travelled along the path
 }
@@ -317,6 +323,7 @@ impl Board {
             unit.hp = hp;
             unit.max_hp = hp;
             unit.reward = reward;
+            unit.slowed_until_tick = 0;
             unit.spawn_tick = spawn_tick;
             unit.progress_subtiles = 0;
             self.next_unit_id = self.next_unit_id.saturating_add(1);
@@ -341,6 +348,24 @@ impl Board {
         n
     }
 
+    /// Largest number of ticks that can be safely applied in a single
+    /// `advance_game` call given the current board density, so the slice's total
+    /// compute cost stays under the per-transaction CU cap. The dominant cost is
+    /// `tower_count * MAX_UNITS` per tick, so we divide a fixed tick budget by
+    /// `max(tower_count, 1)`. Always at least 1 (so we make progress even on a
+    /// maxed-out board) and never more than `MAX_TICKS_PER_SLICE`. Pure integer
+    /// function of `tower_count`, so the TS client mirrors it exactly.
+    ///
+    /// NOTE: we deliberately do NOT use the `sol_remaining_compute_units`
+    /// syscall (SIMD-0049) for a dynamic budget - that syscall's activation
+    /// feature was withdrawn / held and is NOT registered on the runtime, so a
+    /// program that references it fails to deploy ("Unresolved symbol"). This
+    /// static, tower-count-derived cap is deploy-safe and fully deterministic.
+    pub fn max_safe_ticks(&self) -> u64 {
+        let towers = (self.tower_count as u64).max(1);
+        (SAFE_TICK_BUDGET / towers).clamp(1, MAX_TICKS_PER_SLICE)
+    }
+
     /// Advance the simulation by exactly `ticks` ticks. This is a PURE function
     /// of the board state and tick count - NO Clock, NO randomness - so the TS
     /// client can run the identical loop to predict state bit-for-bit.
@@ -354,7 +379,16 @@ impl Board {
     /// Tower shots are resolved by `apply_tick_shots`, called after movement in
     /// a later milestone. Keeping movement isolated keeps each milestone's test
     /// exact.
-    pub fn apply_ticks(&mut self, ticks: u64) {
+    pub fn apply_ticks(&mut self, ticks: u64) -> u64 {
+        // Compute-budget guard (STATIC density cap - see max_safe_ticks). The
+        // dominant per-tick cost is O(tower_count * MAX_UNITS); capping ticks by
+        // tower density keeps the WHOLE slice under the 1.4M CU per-transaction
+        // cap regardless of how busy the board is, then we apply the smaller of
+        // that and the requested count. Any shortfall is drained by the client
+        // calling advance_game again (each call re-derives the cap against the
+        // then-current density). Determinism holds: applying N then M ticks is
+        // identical to applying N+M in one call.
+        let ticks = ticks.min(self.max_safe_ticks());
         let path_len_sub = self.path_length_subtiles();
         let mut applied = 0u64;
         while applied < ticks {
@@ -426,7 +460,16 @@ impl Board {
                         self.units[i].state = UNIT_STATE_WALKING;
                     }
                 } else if state == UNIT_STATE_WALKING {
-                    let speed = self.units[i].speed_subtiles as u64;
+                    // Effective speed: reduced by SLOW_PERCENT while a slow tower's
+                    // debuff is active (current tick before slowed_until_tick).
+                    // Integer math, floored, min 1 so a slowed unit never fully
+                    // stalls. Deterministic - the client runs the identical calc.
+                    let base = self.units[i].speed_subtiles as u64;
+                    let speed = if (tick as u32) < self.units[i].slowed_until_tick {
+                        (base.saturating_mul(100 - SLOW_PERCENT as u64) / 100).max(1)
+                    } else {
+                        base
+                    };
                     let new_progress = self.units[i].progress_subtiles.saturating_add(speed);
                     if new_progress >= path_len_sub {
                         self.units[i].progress_subtiles = path_len_sub;
@@ -442,6 +485,7 @@ impl Board {
             self.current_tick = tick;
             applied += 1;
         }
+        applied
     }
 
     /// Apply `dmg` to the unit at `idx`, marking it dead and awarding its
@@ -458,6 +502,19 @@ impl Board {
             let reward = unit.reward;
             self.gold = self.gold.saturating_add(reward);
             self.kills = self.kills.saturating_add(1);
+        }
+    }
+
+    /// Apply a slow debuff to the walking unit at `idx`, extending its
+    /// `slowed_until_tick` to `until` (never shortening an existing longer
+    /// slow - refresh, not stack). No-op on non-walking units. Deterministic.
+    fn apply_slow(&mut self, idx: usize, until: u32) {
+        let unit = &mut self.units[idx];
+        if unit.state != UNIT_STATE_WALKING {
+            return;
+        }
+        if until > unit.slowed_until_tick {
+            unit.slowed_until_tick = until;
         }
     }
 
@@ -519,16 +576,24 @@ impl Board {
 
             if let Some(target) = best {
                 let dmg = tower.damage;
+                // Slow towers also stamp a slow debuff on everyone they hit. The
+                // debuff expires at `tick + SLOW_DURATION_TICKS` (truncated to
+                // u32; see Unit::slowed_until_tick). 0 = this tower doesn't slow.
+                let slow_until = if tower.kind == TOWER_KIND_SLOW {
+                    (tick.saturating_add(SLOW_DURATION_TICKS)) as u32
+                } else {
+                    0
+                };
 
-                // Apply `dmg` to a single unit, handling kill bookkeeping.
-                // Inlined as a closure-free helper via a small loop below so we
-                // can reuse it for the primary hit and every splash victim while
-                // keeping deterministic iteration order.
+                // Apply `dmg` (and any slow) to the primary target.
                 self.damage_unit(target, dmg);
+                if slow_until != 0 {
+                    self.apply_slow(target, slow_until);
+                }
 
-                // Splash: also damage every OTHER walking unit within
-                // splash_radius of the PRIMARY TARGET's position. Deterministic:
-                // fixed unit-index order, integer squared-distance, same `dmg`.
+                // Splash: also hit every OTHER walking unit within splash_radius
+                // of the PRIMARY TARGET's position. Deterministic: fixed
+                // unit-index order, integer squared-distance, same `dmg`/slow.
                 // splash_radius == 0 (basic tower) skips this entirely so its
                 // behaviour is byte-for-byte unchanged.
                 let splash = tower.splash_radius_subtiles as i64;
@@ -545,6 +610,9 @@ impl Board {
                                 dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
                             if dist_sq <= splash_sq {
                                 self.damage_unit(si, dmg);
+                                if slow_until != 0 {
+                                    self.apply_slow(si, slow_until);
+                                }
                             }
                         }
                         si += 1;

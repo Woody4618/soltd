@@ -12,20 +12,32 @@ import {
 import { useWallet } from "@solana/wallet-adapter-react"
 import WalletMultiButton from "@/components/WalletMultiButton"
 import SessionKeyButton from "@/components/SessionKeyButton"
-import TowerDefenseBoard from "@/components/TowerDefenseBoard"
+import TowerDefenseBoard, { BOARD_SIZE } from "@/components/TowerDefenseBoard"
+import TowerDefenseHud from "@/components/TowerDefenseHud"
 import TowerDefensePanel from "@/components/TowerDefensePanel"
+import TowerDefenseGameOverModal from "@/components/TowerDefenseGameOverModal"
 
 export default function TowerDefensePage() {
   const { publicKey } = useWallet()
 
   return (
-    <Box minH="100vh" bg="#0f1117" color="gray.100">
+    <Box
+      minH="100vh"
+      bg="#0f1117"
+      color="gray.100"
+      fontFamily='"Comicoro", "Comic Sans MS", cursive, system-ui'
+    >
       <Flex px={4} py={3} align="center">
         <HStack spacing={4}>
           <Link as={NextLink} href="/">
             &larr; Lumberjack
           </Link>
-          <Heading size="md">On-chain Tower Defense</Heading>
+          <Heading
+            size="lg"
+            fontFamily='"Comicoro", "Comic Sans MS", cursive, system-ui'
+          >
+            Garden Picnic Defense
+          </Heading>
         </HStack>
         <Spacer />
         <HStack>
@@ -44,11 +56,19 @@ export default function TowerDefensePage() {
             wrap="wrap"
             px={4}
           >
-            <TowerDefenseBoard />
+            {/* Left column: game stats directly above the board. */}
+            <VStack spacing={3} align="stretch" w={`${BOARD_SIZE}px`}>
+              <TowerDefenseHud />
+              <TowerDefenseBoard />
+            </VStack>
+            {/* Right column: build reference, controls, reset, how-to. */}
             <TowerDefensePanel />
           </Flex>
         )}
       </VStack>
+
+      {/* Game-over popup (translucent, board still visible behind). */}
+      {publicKey && <TowerDefenseGameOverModal />}
     </Box>
   )
 }

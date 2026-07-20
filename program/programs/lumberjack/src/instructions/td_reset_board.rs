@@ -59,7 +59,7 @@ pub fn reset_board(ctx: Context<ResetBoard>) -> Result<()> {
             hp: 0,
             max_hp: 0,
             reward: 0,
-            _pad1: 0,
+            slowed_until_tick: 0,
             spawn_tick: 0,
             progress_subtiles: 0,
         };

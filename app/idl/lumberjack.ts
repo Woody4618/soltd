@@ -941,7 +941,7 @@ export type Lumberjack = {
             "type": "u32"
           },
           {
-            "name": "pad1",
+            "name": "slowedUntilTick",
             "type": "u32"
           },
           {
@@ -1895,7 +1895,7 @@ export const IDL: Lumberjack = {
             "type": "u32"
           },
           {
-            "name": "pad1",
+            "name": "slowedUntilTick",
             "type": "u32"
           },
           {

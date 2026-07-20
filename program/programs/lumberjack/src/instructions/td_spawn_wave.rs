@@ -38,6 +38,7 @@ pub fn spawn_wave(ctx: Context<SpawnWave>, count: u8) -> Result<()> {
         unit.hp = def.hp;
         unit.max_hp = def.hp;
         unit.reward = def.reward;
+        unit.slowed_until_tick = 0;
         unit.spawn_tick = spawn_tick;
         unit.progress_subtiles = 0;
 

@@ -14,6 +14,11 @@ export const SUBTILES_PER_TILE = 256;
 export const TOWER_KIND_NONE = 0;
 export const TOWER_KIND_BASIC = 1;
 export const TOWER_KIND_SPLASH = 2;
+export const TOWER_KIND_SLOW = 3;
+
+// Slow tower tuning (mirror of constants.rs).
+const SLOW_PERCENT = 40;
+const SLOW_DURATION_TICKS = 20;
 
 export const UNIT_STATE_EMPTY = 0;
 export const UNIT_STATE_QUEUED = 1;
@@ -93,6 +98,7 @@ export interface SimUnit {
   hp: number;
   maxHp: number;
   reward: number;
+  slowedUntilTick: number;
   spawnTick: number;
   progressSubtiles: number;
 }
@@ -197,6 +203,7 @@ function spawnAutoWave(board: SimBoard, baseTick: number): void {
     u.hp = hp;
     u.maxHp = hp;
     u.reward = reward;
+    u.slowedUntilTick = 0;
     u.spawnTick = baseTick + spawned * UNIT_SPAWN_STAGGER_TICKS;
     u.progressSubtiles = 0;
     spawned += 1;
@@ -290,9 +297,14 @@ function applyTickShots(board: SimBoard, tick: number): void {
     }
 
     if (best !== -1) {
-      // Apply tower.damage to a walking+alive unit, with kill bookkeeping.
-      // Mirror of Board::damage_unit.
-      const damageUnit = (idx: number) => {
+      // Slow towers stamp a slow debuff on every unit they hit (mirror of the
+      // program). 0 = this tower doesn't slow.
+      const slowUntil =
+        tower.kind === TOWER_KIND_SLOW ? tick + SLOW_DURATION_TICKS : 0;
+
+      // Apply tower.damage (+ any slow) to a walking+alive unit, with kill
+      // bookkeeping. Mirror of Board::damage_unit + Board::apply_slow.
+      const hitUnit = (idx: number) => {
         const u = board.units[idx];
         if (u.state !== UNIT_STATE_WALKING) return;
         u.hp = Math.max(0, u.hp - tower.damage);
@@ -300,10 +312,12 @@ function applyTickShots(board: SimBoard, tick: number): void {
           u.state = UNIT_STATE_DEAD;
           board.gold += u.reward;
           board.kills += 1;
+        } else if (slowUntil > u.slowedUntilTick) {
+          u.slowedUntilTick = slowUntil;
         }
       };
 
-      damageUnit(best);
+      hitUnit(best);
 
       // Splash: hit every OTHER walking unit within splashRadius of the primary
       // target. Mirror of the program. splashRadius === 0 skips it.
@@ -317,7 +331,7 @@ function applyTickShots(board: SimBoard, tick: number): void {
           const [ux, uy] = positionAt(board, board.units[si].progressSubtiles);
           const dx = ux - cx;
           const dy = uy - cy;
-          if (dx * dx + dy * dy <= splashSq) damageUnit(si);
+          if (dx * dx + dy * dy <= splashSq) hitUnit(si);
         }
       }
 
@@ -369,7 +383,13 @@ export function applyTicks(board: SimBoard, ticks: number): void {
       if (u.state === UNIT_STATE_QUEUED) {
         if (u.spawnTick <= tick) u.state = UNIT_STATE_WALKING;
       } else if (u.state === UNIT_STATE_WALKING) {
-        const newProgress = u.progressSubtiles + u.speedSubtiles;
+        // Effective speed: reduced by SLOW_PERCENT while slowed (mirror of the
+        // program - integer floor, min 1).
+        const speed =
+          tick < u.slowedUntilTick
+            ? Math.max(1, Math.floor((u.speedSubtiles * (100 - SLOW_PERCENT)) / 100))
+            : u.speedSubtiles;
+        const newProgress = u.progressSubtiles + speed;
         if (newProgress >= pathLenSub) {
           u.progressSubtiles = pathLenSub;
           u.state = UNIT_STATE_REACHED_END;
@@ -420,6 +440,7 @@ export function fromChain(acc: any): SimBoard {
       hp: num(u.hp),
       maxHp: num(u.maxHp),
       reward: num(u.reward),
+      slowedUntilTick: num(u.slowedUntilTick),
       spawnTick: num(u.spawnTick),
       progressSubtiles: num(u.progressSubtiles),
     })),

@@ -1,6 +1,21 @@
+/* Themed game font for the tower-defense UI (from public/assets/font). */
+@font-face {
+  font-family: "Comicoro";
+  src: url("/assets/font/Comicoro.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Apply with `fontFamily: "var(--font-game)"` (or the .font-game class). */
+.font-game {
+  font-family: "Comicoro", "Comic Sans MS", cursive, system-ui;
+}
+
 :root {
   --max-width: 1100px;
   --border-radius: 12px;
+  --font-game: "Comicoro", "Comic Sans MS", cursive, system-ui;
   --font-mono: ui-monospace, Menlo, Monaco, 'Cascadia Mono', 'Segoe UI Mono',
     'Roboto Mono', 'Oxygen Mono', 'Ubuntu Monospace', 'Source Code Pro',
     'Fira Mono', 'Droid Sans Mono', 'Courier New', monospace;

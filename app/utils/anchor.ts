@@ -10,6 +10,7 @@ export {
   TOWER_KIND_NONE,
   TOWER_KIND_BASIC,
   TOWER_KIND_SPLASH,
+  TOWER_KIND_SLOW,
   towerDef,
 } from "./tdDefs"
 export type { TowerDef } from "./tdDefs"
@@ -71,14 +72,21 @@ export const TOWER_BUILD_TICKS = 30 // ticks from placement until a tower arms
 export const TOWER_UPGRADE_BUILD_TICKS = 30 // ticks for an upgrade to take effect
 
 // Per-kind stats now live in the generated TOWER_DEFS table. These scalar
-// aliases (basic tower = kind 1) preserve the existing call sites while the UI
-// still assumes a single build-menu tower; multi-kind UI can read TOWER_DEFS
-// directly.
+// aliases resolve to the BASIC tower (kind 1) only.
+//
+// WARNING: upgrade cost/damage/range differ PER TOWER KIND (basic vs splash vs
+// slow). Do NOT use the *_UPGRADE_* aliases below for an arbitrary tower - read
+// `towerDef(tower.kind)` instead, or the client will diverge from what the
+// program charges/applies (this exact bug: splash upgrade is 70g, not 50g).
+// max_level currently matches across kinds, so TOWER_MAX_LEVEL is safe.
 const BASIC = TOWER_DEFS[TOWER_KIND_BASIC - 1]
 export const TOWER_BASIC_COST = BASIC.cost
+/** @deprecated per-kind - use towerDef(kind).upgradeCost */
 export const TOWER_UPGRADE_COST = BASIC.upgradeCost
 export const TOWER_MAX_LEVEL = BASIC.maxLevel
+/** @deprecated per-kind - use towerDef(kind).upgradeDamageBonus */
 export const TOWER_UPGRADE_DAMAGE_BONUS = BASIC.upgradeDamageBonus
+/** @deprecated per-kind - use towerDef(kind).upgradeRangeBonus */
 export const TOWER_UPGRADE_RANGE_BONUS = BASIC.upgradeRangeBonus
 
 // Board PDA: ["board", authority].

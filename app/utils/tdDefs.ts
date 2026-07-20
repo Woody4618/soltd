@@ -20,6 +20,7 @@ export interface TowerDef {
 export const TOWER_KIND_NONE = 0
 export const TOWER_KIND_BASIC = 1
 export const TOWER_KIND_SPLASH = 2
+export const TOWER_KIND_SLOW = 3
 
 // Balance rows indexed by (kind - 1), mirroring the Rust TOWER_DEFS order.
 export const TOWER_DEFS: readonly TowerDef[] = [
@@ -42,6 +43,17 @@ export const TOWER_DEFS: readonly TowerDef[] = [
     splashRadiusSubtiles: 256,
     upgradeCost: 70,
     upgradeDamageBonus: 5,
+    upgradeRangeBonus: 256,
+    maxLevel: 3,
+  },
+  {
+    cost: 90,
+    rangeSubtiles: 512,
+    damage: 2,
+    cooldownTicks: 8,
+    splashRadiusSubtiles: 256,
+    upgradeCost: 60,
+    upgradeDamageBonus: 1,
     upgradeRangeBonus: 256,
     maxLevel: 3,
   },
@@ -69,6 +81,11 @@ export const ENEMY_KIND_BOSS = 3
 
 // A boss is added on every Nth wave (0-indexed): waves 4, 9, 14, ...
 export const BOSS_WAVE_INTERVAL = 5
+
+// Slow tower: hit enemies move SLOW_PERCENT% slower for SLOW_DURATION_TICKS
+// ticks (refreshed, not stacked). Mirrors the Rust constants.
+export const SLOW_PERCENT = 40
+export const SLOW_DURATION_TICKS = 20
 
 // Base (wave-0) stats per enemy kind, indexed by kind id. Per-wave growth is
 // applied on top by the sim (see tdSim.ts).
