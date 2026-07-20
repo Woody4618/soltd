@@ -32,7 +32,7 @@ export default function Home() {
           size="lg"
           fontFamily='"Comicoro", "Comic Sans MS", cursive, system-ui'
         >
-          Garden Picnic Defense
+          Sol-TD
         </Heading>
         <Spacer />
         <HStack>

@@ -1,5 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { Button, HStack, Text, Tooltip, VStack } from "@chakra-ui/react"
+import { useCallback, useEffect, useState } from "react"
+import {
+  Button,
+  HStack,
+  Popover,
+  PopoverArrow,
+  PopoverBody,
+  PopoverCloseButton,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTrigger,
+  Text,
+  VStack,
+} from "@chakra-ui/react"
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js"
 import { useWallet } from "@solana/wallet-adapter-react"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
@@ -181,58 +193,79 @@ const SessionKeyButton = () => {
       ? status.secondsLeft
       : 0
 
+  // Compact, non-noisy status pill. The Renew/Revoke actions are tucked into a
+  // popover that opens when you click the pill, so the toolbar stays clean.
   return (
-    <VStack spacing={1} align="stretch">
-      <HStack
-        spacing={2}
-        px={3}
-        py={1}
-        bg={expiring ? "#3a331d" : "#1d2a1d"}
-        borderRadius="md"
-        border={`1px solid ${expiring ? "#7a6f2f" : "#2f7a3f"}`}
-      >
-        <Text
-          fontSize="sm"
-          fontWeight="bold"
-          color={expiring ? "yellow.300" : "green.300"}
+    <Popover placement="bottom-end">
+      <PopoverTrigger>
+        <HStack
+          as="button"
+          spacing={2}
+          px={3}
+          py={1}
+          bg={expiring ? "#3a331d" : "#1d2a1d"}
+          borderRadius="md"
+          border={`1px solid ${expiring ? "#7a6f2f" : "#2f7a3f"}`}
+          cursor="pointer"
+          transition="filter 0.15s"
+          _hover={{ filter: "brightness(1.25)" }}
+          title="Click to manage this play session"
         >
-          Session {expiring ? "expiring" : "active"}
-        </Text>
-        {status.kind === "loading" ? (
-          <Text fontSize="xs" color="gray.300">
-            …
+          <Text
+            fontSize="sm"
+            fontWeight="bold"
+            color={expiring ? "yellow.300" : "green.300"}
+          >
+            Session {expiring ? "expiring" : "active"}
           </Text>
-        ) : (
-          <Tooltip label="Time until this session key expires">
+          {status.kind === "loading" ? (
+            <Text fontSize="xs" color="gray.300">
+              …
+            </Text>
+          ) : (
             <Text fontSize="xs" color="gray.300">
               {formatDuration(secondsLeft)} left
             </Text>
-          </Tooltip>
-        )}
-      </HStack>
-      <HStack spacing={2}>
-        {expiring && (
-          <Button
-            colorScheme="purple"
-            size="sm"
-            flex={1}
-            isLoading={isLoading}
-            onClick={createSession}
-          >
-            Renew
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          flex={1}
-          isLoading={isLoading}
-          onClick={revokeSession}
-        >
-          Revoke
-        </Button>
-      </HStack>
-    </VStack>
+          )}
+        </HStack>
+      </PopoverTrigger>
+      <PopoverContent bg="#151822" borderColor="#2b2f3a" w="240px">
+        <PopoverArrow bg="#151822" />
+        <PopoverCloseButton />
+        <PopoverHeader borderColor="#2b2f3a" fontSize="sm" fontWeight="bold">
+          Play session
+        </PopoverHeader>
+        <PopoverBody>
+          <VStack spacing={3} align="stretch">
+            <Text fontSize="xs" color="gray.400">
+              A session key lets the game advance itself without a wallet popup
+              each turn. It {expiring ? "is expiring soon" : "is active"} —{" "}
+              {formatDuration(secondsLeft)} left. Revoking refunds the remaining
+              session balance to your wallet.
+            </Text>
+            {expiring && (
+              <Button
+                colorScheme="purple"
+                size="sm"
+                isLoading={isLoading}
+                onClick={createSession}
+              >
+                Renew session
+              </Button>
+            )}
+            <Button
+              colorScheme="red"
+              variant="outline"
+              size="sm"
+              isLoading={isLoading}
+              onClick={revokeSession}
+            >
+              Revoke session
+            </Button>
+          </VStack>
+        </PopoverBody>
+      </PopoverContent>
+    </Popover>
   )
 }
 

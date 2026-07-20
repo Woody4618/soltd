@@ -280,7 +280,17 @@ export const TowerDefenseProvider = ({
   // frame) until the program responds with the real start tick on the confirmed
   // board, at which point the bar begins filling. Cleared once the confirmed
   // board reflects the pending upgrade (predicted derives it) or the action ends.
-  const pendingUpgradesRef = useRef<Set<number>>(new Set())
+  // Maps a tower slot index -> the client PLAYBACK tick captured at click time.
+  // The optimistic cyan upgrade bar is anchored to THIS fixed tick
+  // (readyAtTick = startTick + TOWER_UPGRADE_BUILD_TICKS) rather than being
+  // re-pinned to the current tick every frame. Anchoring to a fixed start makes
+  // the bar begin filling immediately from where the player actually was when
+  // they clicked, and - because we drain the settle up to that same visible tick
+  // before sending the upgrade (see upgradeTower) - it matches the on-chain
+  // ready_at_tick, so the hand-off from optimistic to confirmed is seamless
+  // (no "starts much later"/jump). Cleared once the confirmed anchor reflects
+  // the upgrade or the action fails.
+  const pendingUpgradesRef = useRef<Map<number, number>>(new Map())
   // Optimistic tower PLACEMENTS not yet reflected on-chain. Each is injected as
   // a greyed-out "building" tower into the rendered board the instant you pick
   // it in the build ring, so the tower appears immediately (like the -gold
@@ -302,6 +312,30 @@ export const TowerDefenseProvider = ({
   const awaitingResetRef = useRef(false)
   const resetGuardUntilRef = useRef(0)
   const resetGuardAtRef = useRef(0)
+
+  // Game-over latch. Once ANY confirmed board reports lives <= 0 we capture that
+  // exact board and freeze on it. Previously the render loop re-checked
+  // `latestRef.current.lives <= 0` every frame, but around the moment lives hit
+  // 0 several confirmed boards arrive in quick succession (the drain loop sends
+  // multiple advance slices; the websocket + refresh both fire) and can land
+  // slightly out of order - so `latest` oscillated between a lives>0 board and
+  // the terminal lives==0 board, flipping the freeze on and off frame-to-frame
+  // and making the units flicker. Latching the terminal board once removes the
+  // oscillation: after it's set we always render it and ignore later boards
+  // (unless they're a genuine forward game-over board). Cleared on reset/rewind.
+  const gameOverBoardRef = useRef<SimBoard | null>(null)
+  // Pending, not-yet-confirmed gold spends (one per in-flight build/upgrade),
+  // keyed by a monotonic id. Subtracted from the DISPLAYED gold immediately so
+  // the number drops the instant you click instead of only after the confirmed
+  // board lands (which caused the "gold flips back and forth" - it showed the
+  // old high value, dropped on confirm, then crept back up as predicted kills
+  // re-earned it). Each entry is GC'd deterministically once the confirmed
+  // anchor board already reflects the spend (tower present / upgrade pending),
+  // so the value can never double-count or snap.
+  const pendingSpendsRef = useRef<
+    { id: number; amount: number; kind: "place" | "upgrade"; x?: number; y?: number; towerIndex?: number }[]
+  >([])
+  const pendingSpendIdRef = useRef(0)
 
   // confirmedRef is the source of truth for game logic (lives/gameover checks).
   const confirmedRef = latestRef
@@ -349,6 +383,9 @@ export const TowerDefenseProvider = ({
       playbackTickRef.current = sim.currentTick
       ceilingTickRef.current = sim.currentTick
       confirmedAtRef.current = performance.now()
+      // A rewind means a fresh/reset game - drop any prior game-over latch so
+      // the new game isn't instantly frozen by the old terminal board.
+      if (sim.lives > 0) gameOverBoardRef.current = null
     } else if (sim.currentTick === prevLatest.currentTick) {
       // SAME tick, new content (e.g. a tower was placed/upgraded - those
       // instructions mutate state without advancing time). Merge the new board
@@ -389,6 +426,16 @@ export const TowerDefenseProvider = ({
       confirmedAtRef.current = nowMs - leadMs
     }
 
+    // Latch game over exactly once. Keep the terminal board with the HIGHEST
+    // tick (a later confirmed slice may carry the true final positions); ignore
+    // stale lower-tick boards so the freeze target never oscillates.
+    if (sim.lives <= 0) {
+      const prev = gameOverBoardRef.current
+      if (!prev || sim.currentTick >= prev.currentTick) {
+        gameOverBoardRef.current = sim
+      }
+    }
+
     latestRef.current = sim
     setConfirmed(sim)
   }, [])
@@ -410,6 +457,8 @@ export const TowerDefenseProvider = ({
     awaitingResetRef.current = false
     resetGuardUntilRef.current = 0
     resetGuardAtRef.current = 0
+    gameOverBoardRef.current = null
+    pendingSpendsRef.current = []
     if (!publicKey) {
       setBoardPDA(null)
       return
@@ -472,14 +521,19 @@ export const TowerDefenseProvider = ({
       const buf = confirmedBufRef.current
       if (buf.length > 0) {
         // Game over: the chain rejects any further advance once lives hit 0, so
-        // the confirmed state is frozen. Freeze the client too - snap playback
-        // to the confirmed game-over board and stop predicting ahead (otherwise
-        // the local sim would keep marching enemies/waves past the real end).
-        const latest = latestRef.current
-        if (latest && latest.lives <= 0) {
-          playbackTickRef.current = latest.currentTick
+        // the confirmed state is frozen. Freeze the client too - render the
+        // LATCHED terminal board (captured once in applyConfirmed) and stop
+        // predicting ahead. Using the latch instead of re-reading
+        // latestRef.current every frame is what kills the flicker: latestRef can
+        // bounce between a lives>0 slice and the terminal lives==0 slice while
+        // several confirmations settle, which used to toggle this freeze on and
+        // off. The latch is monotonic (set once, cleared only on reset), so the
+        // frozen frame is stable.
+        const over = gameOverBoardRef.current
+        if (over) {
+          playbackTickRef.current = over.currentTick
           lastFrameRef.current = now
-          pushPredicted(latest)
+          pushPredicted(over)
           raf = requestAnimationFrame(frame)
           return
         }
@@ -530,7 +584,7 @@ export const TowerDefenseProvider = ({
         // playback caught up. This is what made a 2nd rapid upgrade's bar
         // disappear. We also drop overlays whose tower slot is gone/empty.
         if (pendingUpgradesRef.current.size > 0) {
-          pendingUpgradesRef.current.forEach((idx) => {
+          pendingUpgradesRef.current.forEach((_startTick, idx) => {
             const at = anchor.towers[idx]
             if (!at || at.kind === 0 || at.pendingLevel !== 0) {
               pendingUpgradesRef.current.delete(idx)
@@ -550,11 +604,42 @@ export const TowerDefenseProvider = ({
           )
         }
 
+        // Garbage-collect optimistic gold spends once the render anchor already
+        // reflects the spend on-chain (the tower is present for a placement, or
+        // the upgrade is pending/committed for an upgrade). At that point the
+        // anchor's own gold already has the cost subtracted, so we must stop
+        // subtracting it again - otherwise we'd double-count. Keyed off the
+        // ANCHOR (the board we render), not latestRef, for the same reason the
+        // other overlays are: the latest confirmed board can lead playback.
+        if (pendingSpendsRef.current.length > 0) {
+          pendingSpendsRef.current = pendingSpendsRef.current.filter((s) => {
+            if (s.kind === "place") {
+              const landed = anchor.towers.some(
+                (t) => t.kind !== 0 && t.x === s.x && t.y === s.y
+              )
+              return !landed
+            }
+            // upgrade: drop once the targeted tower shows the pending upgrade.
+            const t =
+              s.towerIndex != null ? anchor.towers[s.towerIndex] : undefined
+            return !(t && t.kind !== 0 && t.pendingLevel !== 0)
+          })
+        }
+        const pendingSpendTotal = pendingSpendsRef.current.reduce(
+          (sum, s) => sum + s.amount,
+          0
+        )
+
         // Apply the optimistic upgrade overlay onto whatever board we're about
         // to render: show the cyan upgrade bar the instant you click.
         const upgrades = pendingUpgradesRef.current
         const placements = pendingPlacementsRef.current
         const applyOverlays = (b: SimBoard) => {
+          // Optimistic gold: subtract not-yet-confirmed spends so the number
+          // drops the instant you click and can't be over-spent. Floored at 0.
+          if (pendingSpendTotal > 0) {
+            b.gold = Math.max(0, b.gold - pendingSpendTotal)
+          }
           // Optimistic placements: inject each as a greyed-out "building" tower
           // into the next free slot so it appears the instant you click, pinned
           // as still-building (readyAtTick a full build-time ahead) until the
@@ -590,7 +675,7 @@ export const TowerDefenseProvider = ({
             })
           }
           if (upgrades.size > 0) {
-            upgrades.forEach((idx) => {
+            upgrades.forEach((startTick, idx) => {
               const t = b.towers[idx]
               // Only overlay while the chain hasn't reflected the upgrade yet
               // (pendingLevel still 0). Once the confirmed board carries the real
@@ -598,26 +683,27 @@ export const TowerDefenseProvider = ({
               // that (its real readyAtTick drives the filling bar).
               if (t && t.kind !== 0 && t.pendingLevel === 0) {
                 // Show the pending upgrade (so the cyan bar APPEARS immediately)
-                // but pin it at 0% by keeping readyAtTick a full build-time
-                // ahead of the current tick every frame. The bar only starts
-                // FILLING once the program responds with the real start tick
-                // (carried on the confirmed board), which anchors readyAtTick.
+                // and start it filling from the FIXED tick captured at click
+                // time (startTick), not re-pinned to the current tick each
+                // frame. Because the upgrade tx is only sent after the settle
+                // drains the chain up to that same visible tick, the on-chain
+                // ready_at_tick equals startTick + TOWER_UPGRADE_BUILD_TICKS too,
+                // so when the confirmed board takes over there's no jump.
                 // Upgrade bonuses are per tower KIND, so read them from that
-                // tower's balance row (basic/splash/slow differ). This is only a
-                // transient preview - the confirmed board overrides it - but it
-                // keeps the preview honest.
+                // tower's balance row (basic/splash/slow differ).
                 const def = towerDef(t.kind)
                 t.pendingLevel = t.level + 1
                 t.pendingDamage = t.damage + (def?.upgradeDamageBonus ?? 0)
                 t.pendingRangeSubtiles =
                   t.rangeSubtiles + (def?.upgradeRangeBonus ?? 0)
-                t.readyAtTick = b.currentTick + TOWER_UPGRADE_BUILD_TICKS
+                t.readyAtTick = startTick + TOWER_UPGRADE_BUILD_TICKS
               }
             })
           }
         }
 
-        const hasOverlay = upgrades.size > 0 || placements.length > 0
+        const hasOverlay =
+          upgrades.size > 0 || placements.length > 0 || pendingSpendTotal > 0
         if (playTick <= anchor.currentTick) {
           if (hasOverlay) {
             const adj = cloneBoard(anchor)
@@ -929,6 +1015,9 @@ export const TowerDefenseProvider = ({
     // Drop any optimistic overlays - the board is about to be wiped.
     pendingUpgradesRef.current.clear()
     pendingPlacementsRef.current = []
+    pendingSpendsRef.current = []
+    // A new game clears any prior game-over freeze latch.
+    gameOverBoardRef.current = null
     try {
       await ensureHighscore()
       // Auto-session: bundle create_session into the reset tx when none exists
@@ -1069,6 +1158,14 @@ export const TowerDefenseProvider = ({
         ...pendingPlacementsRef.current.filter((p) => p.x !== x || p.y !== y),
         { x, y, kind },
       ]
+      // Optimistic gold: record the build cost so displayed gold drops the
+      // instant you click and can't be over-spent. GC'd once the confirmed
+      // anchor carries the tower on this tile.
+      const placeSpendId = pendingSpendIdRef.current++
+      pendingSpendsRef.current = [
+        ...pendingSpendsRef.current.filter((s) => !(s.kind === "place" && s.x === x && s.y === y)),
+        { id: placeSpendId, amount: def.cost, kind: "place", x, y },
+      ]
       let placed = false
       setBusy(true)
       try {
@@ -1120,12 +1217,16 @@ export const TowerDefenseProvider = ({
         }
       } finally {
         setBusy(false)
-        // If the send failed, drop the optimistic ghost so it doesn't linger.
-        // On success we keep it: it's GC'd automatically once the confirmed
-        // board carries the real tower (avoids a flicker in between).
+        // If the send failed, drop the optimistic ghost + gold spend so they
+        // don't linger. On success we keep them: they're GC'd automatically
+        // once the confirmed board carries the real tower (avoids a flicker in
+        // between).
         if (!placed) {
           pendingPlacementsRef.current = pendingPlacementsRef.current.filter(
             (p) => p.x !== x || p.y !== y
+          )
+          pendingSpendsRef.current = pendingSpendsRef.current.filter(
+            (s) => s.id !== placeSpendId
           )
         }
       }
@@ -1201,10 +1302,29 @@ export const TowerDefenseProvider = ({
           return
         }
       }
-      // Mark this tower as having an in-flight upgrade so the cyan bar APPEARS
-      // immediately (pinned at 0%). It only starts FILLING once the program
-      // responds with the real start tick. Cleared in `finally`.
-      pendingUpgradesRef.current.add(towerIndex)
+      // Mark this tower as having an in-flight upgrade, capturing the CURRENT
+      // playback tick as the bar's fixed start anchor. The cyan bar appears
+      // immediately and fills from this tick (readyAtTick = startTick +
+      // TOWER_UPGRADE_BUILD_TICKS). Because the bundled settle brings the chain
+      // up to this same visible tick before the upgrade executes, the on-chain
+      // ready_at_tick matches, so the confirmed board takes over seamlessly (no
+      // "starts much later" jump). Two rapid upgrades each capture their own
+      // click-time tick, so the second no longer inherits the first's future
+      // anchor. Cleared in `finally`.
+      const upgradeStartTick = Math.floor(playbackTickRef.current)
+      pendingUpgradesRef.current.set(towerIndex, upgradeStartTick)
+      // Optimistic gold: record the spend so displayed gold drops immediately
+      // and can't be over-spent while this upgrade is in flight. GC'd once the
+      // confirmed anchor shows the pending upgrade.
+      const upCost =
+        towerDef(board?.towers[towerIndex]?.kind ?? 0)?.upgradeCost ?? 0
+      const upSpendId = pendingSpendIdRef.current++
+      if (upCost > 0) {
+        pendingSpendsRef.current = [
+          ...pendingSpendsRef.current,
+          { id: upSpendId, amount: upCost, kind: "upgrade", towerIndex },
+        ]
+      }
       setBusy(true)
       try {
         const hasSession =
@@ -1258,8 +1378,12 @@ export const TowerDefenseProvider = ({
         } else {
           reportError("Upgrade tower failed", e)
         }
-        // Failed: nothing landed on-chain, so remove the optimistic bar now.
+        // Failed: nothing landed on-chain, so remove the optimistic bar and the
+        // optimistic gold spend now.
         pendingUpgradesRef.current.delete(towerIndex)
+        pendingSpendsRef.current = pendingSpendsRef.current.filter(
+          (s) => s.id !== upSpendId
+        )
       } finally {
         setBusy(false)
       }
