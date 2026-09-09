@@ -1,5 +1,5 @@
 import Image from "next/image"
-import { useWallet } from "@solana/wallet-adapter-react"
+import { useWallet } from "../utils/walletCompat"
 import { useNftState } from "@/contexts/NftProvider"
 import { useState } from "react";
 

@@ -13,12 +13,12 @@ import {
   PublicKey,
   SendTransactionError,
   SystemProgram,
-} from "@solana/web3.js"
+} from "@solana/web3.js-v1"
 import {
   useAnchorWallet,
   useConnection,
   useWallet,
-} from "@solana/wallet-adapter-react"
+} from "../utils/walletCompat"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { useToast } from "@chakra-ui/react"
 import {
@@ -483,9 +483,13 @@ export const TowerDefenseProvider = ({
     resetGuardAtRef.current = 0
     gameOverBoardRef.current = null
     pendingSpendsRef.current = []
-    // Never auto-drive someone else's chain (and don't carry a stale auto-run
-    // into a spectated game). The effect re-runs on every view switch.
-    setAutoAdvance(false)
+    // Auto-run defaults ON for your OWN game so it plays hands-free out of the
+    // box; it's forced OFF while spectating (we can't drive another player's
+    // chain). The auto-run driver only actually sends when a valid session
+    // exists, so turning it on without a session is harmless (it no-ops until
+    // the session is created, then runs). The game-over effect switches it back
+    // off when lives hit 0.
+    setAutoAdvance(!readOnly && !!publicKey)
     if (!viewKey) {
       setBoardPDA(null)
       return
@@ -1663,16 +1667,20 @@ export const TowerDefenseProvider = ({
     refreshHighscore()
   }, [confirmed, refreshHighscore])
 
-  // Auto-advance loop: while enabled and a session exists, push the sim forward
+  // Auto-advance loop: while enabled AND a session exists, push the sim forward
   // on an interval so the game runs itself. The on-chain time cap keeps it from
-  // fast-forwarding faster than real time.
+  // fast-forwarding faster than real time. We gate on a session so the default
+  // "on" state can't spam main-wallet popups when no session exists yet - it
+  // simply stays idle until the session is created (bundled with Start game),
+  // then starts running automatically.
+  const hasSession = !!(sessionWallet && sessionWallet.sessionToken)
   useEffect(() => {
-    if (!autoAdvance) return
+    if (!autoAdvance || !hasSession) return
     const id = setInterval(() => {
       advance()
     }, 1000)
     return () => clearInterval(id)
-  }, [autoAdvance, advance])
+  }, [autoAdvance, hasSession, advance])
 
   // Enter/leave spectator mode. Watching your OWN wallet is a no-op (just stay
   // on your live game). Also mirrors the choice into the URL (?watch=<pubkey>)

@@ -7,7 +7,7 @@ import {
   Text,
   VStack,
 } from "@chakra-ui/react"
-import { useWallet } from "@solana/wallet-adapter-react"
+import { useWallet } from "../utils/walletCompat"
 import WalletMultiButton from "@/components/WalletMultiButton"
 import SessionKeyButton from "@/components/SessionKeyButton"
 import TowerDefenseBoard, { BOARD_SIZE } from "@/components/TowerDefenseBoard"

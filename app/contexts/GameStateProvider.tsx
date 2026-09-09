@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react"
-import { PublicKey } from "@solana/web3.js"
-import { useConnection, useWallet } from "@solana/wallet-adapter-react"
+import { PublicKey } from "@solana/web3.js-v1"
+import { useConnection, useWallet } from "../utils/walletCompat"
 import {
   program,
   PlayerData,

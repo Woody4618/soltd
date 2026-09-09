@@ -1,7 +1,7 @@
 import { useMemo } from "react"
 import { Box, Button, Divider, HStack, Text, VStack } from "@chakra-ui/react"
-import { PublicKey } from "@solana/web3.js"
-import { useWallet } from "@solana/wallet-adapter-react"
+import { PublicKey } from "@solana/web3.js-v1"
+import { useWallet } from "../utils/walletCompat"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
 import { HIGHSCORE_RESET_COOLDOWN_SECONDS } from "@/utils/anchor"
 

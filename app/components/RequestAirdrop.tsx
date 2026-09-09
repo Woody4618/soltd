@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Button, Text } from "@chakra-ui/react"
-import { LAMPORTS_PER_SOL } from "@solana/web3.js"
-import { useConnection, useWallet } from "@solana/wallet-adapter-react"
+import { LAMPORTS_PER_SOL } from "@solana/web3.js-v1"
+import { useConnection, useWallet } from "../utils/walletCompat"
 
 const RequestAirdrop = () => {
   const { publicKey } = useWallet()

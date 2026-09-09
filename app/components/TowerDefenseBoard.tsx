@@ -491,8 +491,12 @@ function draw(
     // last hit landed.
     const hitAt = wobble.get(ui)
     if (hitAt !== undefined) {
+      // Clamp age to [0, lifetime): a `bornAt` in the FUTURE (which a large
+      // catch-up replay used to schedule) would otherwise give a negative age
+      // -> decay > 1 (amplified) and an entry that never prunes, which is what
+      // made enemies wobble wildly when returning to the game / after game over.
       const age = now - hitAt
-      if (age < WOBBLE_LIFETIME_MS) {
+      if (age >= 0 && age < WOBBLE_LIFETIME_MS) {
         const decay = 1 - age / WOBBLE_LIFETIME_MS
         const amp = WOBBLE_AMPLITUDE_PX * decay
         cx += Math.sin(age * 0.08) * amp
@@ -672,7 +676,16 @@ const TowerDefenseBoard = () => {
           // combined hp drop into a single summed number.
           if (prevBoard) {
             const gap = board.currentTick - prevBoard.currentTick
-            if (gap > 0 && gap <= 240) {
+            // Only animate transient combat effects for SMALL forward gaps (the
+            // handful of ticks a normal frame covers). A large jump - returning
+            // to the game after being away, snapping to a game-over board, or a
+            // big confirmed catch-up - would otherwise spray hundreds of
+            // bullets/blips and schedule wobble far into the future (which broke
+            // the wobble math). For those we skip the replay effects entirely
+            // and just let the board snap to its new state cleanly. Combat FX
+            // are cosmetic, so dropping them on a jump is unnoticeable.
+            const MAX_FX_GAP = 30
+            if (gap > 0 && gap <= MAX_FX_GAP) {
               const replay = cloneBoard(prevBoard)
               const firstTick = prevBoard.currentTick + 1
               const onShot = (e: ShotEvent) => {
@@ -724,9 +737,15 @@ const TowerDefenseBoard = () => {
           }
           prevBoardRef.current = board
 
-          // Prune expired wobble entries so the map doesn't grow unbounded.
+          // Prune wobble entries: expired (older than the lifetime) OR scheduled
+          // implausibly far in the future (defensive - shouldn't happen now that
+          // effects only fire on small gaps, but keeps the map from ever
+          // retaining a bad future-dated entry).
           for (const [idx, at] of wobbleRef.current) {
-            if (now - at >= WOBBLE_LIFETIME_MS) wobbleRef.current.delete(idx)
+            const age = now - at
+            if (age >= WOBBLE_LIFETIME_MS || age < -WOBBLE_LIFETIME_MS) {
+              wobbleRef.current.delete(idx)
+            }
           }
 
           draw(ctx, board, towers, wobbleRef.current, now, hoverRef.current)
@@ -972,7 +991,7 @@ const RingMenuOverlay = ({
             top={`${by}px`}
             transform="translate(-50%, -50%)"
             as="button"
-            onClick={(e) => {
+            onClick={(e: React.MouseEvent) => {
               e.stopPropagation()
               onPick(item.kind)
             }}
