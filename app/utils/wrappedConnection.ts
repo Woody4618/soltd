@@ -1,4 +1,4 @@
-import { Connection } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js-v1";
 import axios from "axios";
 import { METAPLEX_READAPI } from "./anchor";
 

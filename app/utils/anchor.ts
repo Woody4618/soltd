@@ -1,6 +1,6 @@
 import { Program, IdlAccounts, BN } from "@anchor-lang/core"
 import { Lumberjack, IDL } from "../idl/lumberjack"
-import { clusterApiUrl, Connection, PublicKey } from "@solana/web3.js"
+import { clusterApiUrl, Connection, PublicKey } from "@solana/web3.js-v1"
 import { WrappedConnection } from "./wrappedConnection";
 import { TOWER_DEFS, TOWER_KIND_BASIC, towerDef } from "./tdDefs"
 

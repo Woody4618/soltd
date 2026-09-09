@@ -12,8 +12,8 @@ import {
   Text,
   VStack,
 } from "@chakra-ui/react"
-import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js"
-import { useWallet } from "@solana/wallet-adapter-react"
+import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js-v1"
+import { useWallet } from "../utils/walletCompat"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { program, CONNECTION } from "@/utils/anchor"
 

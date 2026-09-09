@@ -4,7 +4,7 @@ import {
   AnchorWallet,
   useAnchorWallet,
   useConnection,
-} from "@solana/wallet-adapter-react"
+} from "../utils/walletCompat"
 
 interface SessionProviderProps {
   children: React.ReactNode

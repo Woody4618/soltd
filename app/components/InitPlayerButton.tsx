@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react"
 import { Button } from "@chakra-ui/react"
-import { SystemProgram } from "@solana/web3.js"
-import { useConnection, useWallet } from "@solana/wallet-adapter-react"
+import { SystemProgram } from "@solana/web3.js-v1"
+import { useConnection, useWallet } from "../utils/walletCompat"
 import { useGameState } from "@/contexts/GameStateProvider"
 import { GAME_DATA_SEED, gameDataPDA, program } from "@/utils/anchor"
 

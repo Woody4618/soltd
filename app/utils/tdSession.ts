@@ -26,13 +26,13 @@
 // duck-typed `bn.js` methods, so this BN works with gum-sdk's coral program.
 import { BN } from "@anchor-lang/core"
 import { SessionTokenManager } from "@magicblock-labs/gum-sdk"
-import type { AnchorWallet } from "@solana/wallet-adapter-react"
+import type { AnchorWallet } from "./walletCompat"
 import {
   Connection,
   Keypair,
   PublicKey,
   TransactionInstruction,
-} from "@solana/web3.js"
+} from "@solana/web3.js-v1"
 import CryptoJS from "crypto-js"
 
 // --- IndexedDB (mirrors gum-react-sdk/src/utils/indexedDB.ts) ---------------

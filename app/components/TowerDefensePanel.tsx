@@ -6,7 +6,7 @@ import {
   Text,
   VStack,
 } from "@chakra-ui/react"
-import { useWallet } from "@solana/wallet-adapter-react"
+import { useWallet } from "../utils/walletCompat"
 import { useSessionWallet } from "@magicblock-labs/gum-react-sdk"
 import { useTowerDefense } from "@/contexts/TowerDefenseProvider"
 import { ENTRY_FEE_SOL } from "@/utils/anchor"
